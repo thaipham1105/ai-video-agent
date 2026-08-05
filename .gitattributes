@@ -1,0 +1,10 @@
+# Chuẩn hoá xuống dòng: repo lưu LF, checkout trên Windows theo cấu hình máy.
+* text=auto eol=lf
+
+# File nhị phân — không được đụng vào nội dung.
+*.png binary
+*.jpg binary
+*.ico binary
+*.wav binary
+*.mp4 binary
+*.onnx binary

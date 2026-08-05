@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-video-agent.local/schemas/project.schema.json",
+  "title": "Project",
+  "description": "project.json — ID, mục tiêu, tỷ lệ khung hình, thời lượng, ngân sách trần, trạng thái duyệt (brief §7).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "title",
+    "brief_vi",
+    "language",
+    "aspect_ratio",
+    "target_duration_sec",
+    "fps",
+    "budget",
+    "providers",
+    "ai_disclosure",
+    "state",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "brief_vi": { "type": "string", "minLength": 1 },
+    "language": { "type": "string", "minLength": 2 },
+    "aspect_ratio": { "$ref": "#/$defs/aspectRatio" },
+    "target_duration_sec": { "type": "number", "exclusiveMinimum": 0, "maximum": 600 },
+    "fps": { "type": "integer", "minimum": 24, "maximum": 60 },
+    "budget": { "$ref": "#/$defs/budget" },
+    "providers": { "$ref": "#/$defs/providers" },
+    "ai_disclosure": { "$ref": "#/$defs/aiDisclosure" },
+    "state": { "$ref": "#/$defs/projectState" },
+    "approval": {
+      "anyOf": [{ "$ref": "#/$defs/approval" }, { "type": "null" }]
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "history": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transition" }
+    }
+  },
+  "$defs": {
+    "aspectRatio": { "enum": ["9:16", "16:9", "1:1"] },
+    "projectState": {
+      "enum": ["DRAFT", "PLANNED", "APPROVED", "RENDERING", "COMPOSED", "DONE", "FAILED"]
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "cap_usd", "spent_usd", "hard_stop"],
+      "properties": {
+        "currency": { "const": "USD" },
+        "cap_usd": { "type": "number", "minimum": 0 },
+        "spent_usd": { "type": "number", "minimum": 0 },
+        "hard_stop": { "type": "boolean" }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tts", "avatar", "broll", "mode"],
+      "properties": {
+        "tts": { "type": "string" },
+        "avatar": { "type": "string" },
+        "broll": { "type": "string" },
+        "mode": { "enum": ["mock", "real"] },
+        "voice_asset_id": {
+          "anyOf": [{ "type": "string" }, { "type": "null" }],
+          "description": "ID tài sản giọng mẫu đã chốt. Bỏ trống thì pipeline lấy voice_sample đầu tiên trong manifest — thứ tự đổi là giọng đổi thầm lặng."
+        }
+      }
+    },
+    "aiDisclosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "label_vi", "burn_in"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "label_vi": { "type": "string" },
+        "burn_in": { "type": "boolean" }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approved_by", "approved_at", "storyboard_sha256"],
+      "properties": {
+        "approved_by": { "type": "string", "minLength": 1 },
+        "approved_at": { "type": "string", "format": "date-time" },
+        "storyboard_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "note": { "type": "string" }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "from_state", "to_state"],
+      "properties": {
+        "at": { "type": "string", "format": "date-time" },
+        "from_state": { "$ref": "#/$defs/projectState" },
+        "to_state": { "$ref": "#/$defs/projectState" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

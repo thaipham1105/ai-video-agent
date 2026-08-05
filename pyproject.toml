@@ -1,0 +1,101 @@
+[project]
+name = "ai-video-agent"
+version = "0.1.0"
+description = "Local Vietnamese AI video production orchestrator (VieNeu-TTS + Duix-Avatar + FFmpeg)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "typer>=0.15",
+    "jsonschema>=4.23",
+]
+
+[project.optional-dependencies]
+# VieNeu-TTS thật (Gate D02). Cố ý để ngoài phụ thuộc chính: nó kéo theo 63 gói
+# (~250 MB, gồm cả gradio/fastapi/scipy) mà đường đi mock không cần tới.
+#   Cài bằng: uv sync --extra tts
+#
+# numpy<2.3 KHÔNG phải sở thích. Với numpy mới nhất, resolver không tìm được
+# numba tương thích nên lùi về numba 0.53.1 (2021) — bản đó không có wheel cho
+# Python 3.12 và phải build từ nguồn. Ghim numpy<2.3 cho ra numba 0.66 +
+# llvmlite 0.48, đều có wheel sẵn. Xem docs/adr/0004-vieneu-dependencies.md.
+tts = [
+    "vieneu>=3.2.4",
+    "numpy<2.3",
+]
+
+# Nhân bản giọng (voice cloning). Cài bằng: uv sync --extra tts --extra clone
+#
+# Giọng DỰNG SẴN không cần extra này — chúng chạy thuần ONNX. Nhưng nhân bản thì
+# đi qua `vieneu/_v3_turbo_engine/speaker/`, mà ở đó `onnx_extractor.py` có
+# `import torch` ở cấp module và `fbank.py` dùng `torchaudio.compliance.kaldi`.
+# Suy luận thật vẫn do onnxruntime chạy trên `speaker_encoder.onnx`; torch chỉ
+# đóng vai thư viện tensor. Không né được vì đó là import cấp module.
+#
+# Trên Windows/cp312, wheel `torch` của PyPI là 116 MB và KHÔNG kéo theo gói
+# nvidia-*/cuda-toolkit nào, nên đây là bản CPU — không tranh GPU với Duix,
+# đúng tinh thần brief §D02.1. Đã kiểm chứng bằng `uv pip install --dry-run`.
+clone = [
+    "torch>=2.6",
+    "torchaudio>=2.6",
+]
+
+[tool.uv]
+# LOẠI BỎ 'perth'. VieNeu khai báo `perth>=0.2.0`, nhắm tới trình đóng dấu âm
+# thanh của Resemble AI — nhưng gói đó trên PyPI tên là `resemble-perth`. Cái
+# tên trần `perth` thuộc về một dự án hoàn toàn khác ("wrapper for
+# threading.local", sdist 1,7 KB, tác giả khác), tức là cài vào cũng không có
+# tác dụng gì.
+#
+# Upstream đã phòng sẵn: `_init_watermarker()` bắt cả ImportError lẫn
+# AttributeError rồi đặt watermarker = None. Nên bỏ perth cho ra hành vi y hệt
+# lúc cài nhầm gói kia, chỉ khác là không kéo thêm một sdist lạ (sdist chạy
+# setup.py lúc cài) vào chuỗi cung ứng. Đổi lại: không có đóng dấu ẩn trong
+# audio — nhãn AI của dự án là nhãn nhìn thấy được do FFmpeg khắc lên hình.
+#
+# Marker dưới đây không bao giờ đúng, nên yêu cầu perth bị bỏ hẳn.
+override-dependencies = ["perth ; python_version < '3.0'"]
+
+[project.scripts]
+aiva = "ai_video_agent.cli.main:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_video_agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "ANN", "S", "PTH", "C4", "DTZ", "BLE"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "ANN", "PTH"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+# `vieneu`/`soundfile` không kèm py.typed; cả hai chỉ được import bên trong hàm.
+module = ["jsonschema.*", "vieneu.*", "soundfile.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"

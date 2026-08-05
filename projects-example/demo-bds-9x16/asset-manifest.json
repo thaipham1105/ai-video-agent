@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "project_id": "demo-bds-9x16",
+  "assets": [
+    {
+      "id": "avatar-nguoi-dai-dien",
+      "path": "avatar/nguoi-dai-dien-2026-08.mp4",
+      "sha256": "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+      "kind": "avatar_source",
+      "bytes": 18234567,
+      "consent": {
+        "status": "granted",
+        "owner": "Nguyễn Văn A",
+        "granted_by": "Nguyễn Văn A",
+        "granted_at": "2026-08-04T09:30:00Z",
+        "scope": "Video marketing BĐS, đăng Facebook/TikTok/Zalo, đến hết 2027",
+        "evidence_ref": "HS-2026-001"
+      },
+      "source": "Quay tại văn phòng ngày 2026-08-01",
+      "notes": "SHA-256 trong file mẫu này là giá trị minh hoạ."
+    },
+    {
+      "id": "giong-mau",
+      "path": "voice/giong-mau-8s.wav",
+      "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+      "kind": "voice_sample",
+      "bytes": 768044,
+      "consent": {
+        "status": "granted",
+        "owner": "Nguyễn Văn A",
+        "granted_by": "Nguyễn Văn A",
+        "granted_at": "2026-08-04T09:30:00Z",
+        "scope": "Nhân bản giọng cho video marketing BĐS đến hết 2027",
+        "evidence_ref": "HS-2026-001"
+      },
+      "source": "Thu tại văn phòng ngày 2026-08-01",
+      "notes": "Chỉ dùng cho chiến dịch Q3/2026."
+    },
+    {
+      "id": "logo-cong-ty",
+      "path": "brand/logo.png",
+      "sha256": "fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9",
+      "kind": "logo",
+      "bytes": 42118,
+      "consent": {
+        "status": "not_required",
+        "owner": "Công ty",
+        "granted_by": null,
+        "granted_at": null,
+        "scope": "Tài sản của chính dự án",
+        "evidence_ref": ""
+      },
+      "source": "Bộ nhận diện thương hiệu nội bộ",
+      "notes": ""
+    }
+  ]
+}

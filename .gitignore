@@ -1,0 +1,75 @@
+# =============================================================
+# AI-VIDEO-AGENT — .gitignore
+# Nguyên tắc: KHÔNG có secret, KHÔNG có dữ liệu thật, KHÔNG có
+# model/media trong Git. Xem docs/COST-SAFETY.md.
+# =============================================================
+
+# --- Secrets (tuyệt đối không commit) ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+credentials.json
+service-account*.json
+secrets/
+.claude/settings.local.json
+
+# --- Dữ liệu runtime (model, voice, avatar, renders, docker volumes) ---
+runtime/
+AI-VIDEO-AGENT-RUNTIME/
+projects/
+outputs/
+renders/
+artifacts/
+cache/
+models/
+voice-samples/
+avatar-sources/
+docker-data/
+duix_avatar_data/
+
+# --- Media thật (asset mẫu chỉ được mô tả bằng .md) ---
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+*.onnx
+*.safetensors
+*.ckpt
+*.pt
+*.bin
+*.gguf
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# --- Node (chỉ dùng cho ViMax Web UI ở D05) ---
+node_modules/
+
+# --- OS / editor ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
+*.swp

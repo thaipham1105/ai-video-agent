@@ -1,0 +1,57 @@
+# Compose override cục bộ cho Duix-Avatar — do dự án này tự viết.
+#
+# KHÔNG phải bản sao của upstream. Brief §3 cấm copy mã nguồn upstream vào repo;
+# file này chỉ tham chiếu image đã publish của họ và sửa hai thứ mà máy này bắt
+# buộc phải sửa:
+#
+#   1. Upstream hardcode volume `d:/duix_avatar_data/...` nhưng máy KHÔNG CÓ Ổ D
+#      (D00 §2). Ở đây trỏ sang F, nơi còn 380 GB trống.
+#   2. Chỉ chạy service gen-video. TTS đã do VieNeu-TTS đảm nhiệm từ D02, còn ASR
+#      thì MVP không dùng. Bỏ hai service kia giảm tải từ 37,9 GB xuống 4,66 GB.
+#
+# Image được ghim bằng DIGEST chứ không phải tag `latest` (brief §D03.2): tag có
+# thể bị đẩy đè lúc nào không biết, digest thì không.
+#
+# Chạy:
+#   docker compose -f deploy/duix/docker-compose.yml up -d
+# Gỡ sạch:
+#   docker compose -f deploy/duix/docker-compose.yml down
+#   docker rmi guiji2025/duix.avatar@sha256:1970424d...
+
+services:
+  duix-avatar-gen-video:
+    image: guiji2025/duix.avatar@sha256:1970424d219cbb6aebc7566f069041f057ccad618a395139dce002e1fb25d5ed
+    container_name: duix-avatar-gen-video
+    restart: unless-stopped
+    runtime: nvidia
+    privileged: true
+    shm_size: "8g"
+    environment:
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    volumes:
+      # Dữ liệu thật nằm ngoài repo Git (ADR-0002). Đổi được bằng biến
+      # AIVA_DUIX_DATA nếu muốn để ở ổ khác.
+      - "${AIVA_DUIX_DATA:-F:/AI-VIDEO-AGENT-RUNTIME/duix_avatar_data}/face2face:/code/data"
+      # Tài sản đầu vào, gắn CHỈ ĐỌC. Duix nhận đường dẫn local cho
+      # `video_url`/`audio_url` (chỉ tải về khi chuỗi bắt đầu bằng http), nên
+      # không cần sao chép file vào thư mục dữ liệu của nó. `:ro` bảo đảm
+      # container không thể sửa hay xoá tài sản gốc của người dùng.
+      - "${AIVA_PROJECTS:-F:/AI-VIDEO-AGENT-RUNTIME/projects}:/inputs:ro"
+    ports:
+      - "8383:8383"
+    command: python /code/app_local.py
+    networks:
+      - ai_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+networks:
+  ai_network:
+    driver: bridge

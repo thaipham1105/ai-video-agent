@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-video-agent.local/schemas/render-manifest.schema.json",
+  "title": "RenderManifest",
+  "description": "render-manifest.json — provider/model/version, seed, thời điểm, trạng thái, chi phí dự kiến/thực tế, file vào/ra (brief §7).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_id",
+    "run_id",
+    "dry_run",
+    "provider_mode",
+    "storyboard_sha256",
+    "created_at",
+    "status",
+    "records",
+    "estimated_cost_usd",
+    "actual_cost_usd",
+    "ai_disclosure_applied"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "dry_run": { "type": "boolean" },
+    "provider_mode": { "enum": ["mock", "real"] },
+    "storyboard_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "finished_at": {
+      "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+    },
+    "status": { "enum": ["planned", "running", "succeeded", "failed"] },
+    "records": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/record" }
+    },
+    "estimated_cost_usd": { "type": "number", "minimum": 0 },
+    "actual_cost_usd": { "type": "number", "minimum": 0 },
+    "ai_disclosure_applied": { "type": "boolean" },
+    "tool_versions": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "outputs": { "type": "array", "items": { "type": "string" } },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "provider", "model", "version", "mode", "status"],
+      "properties": {
+        "stage": { "enum": ["tts", "avatar", "broll", "subtitle", "compose"] },
+        "shot_id": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string" },
+        "version": { "type": "string" },
+        "mode": { "enum": ["mock", "real"] },
+        "seed": { "anyOf": [{ "type": "integer" }, { "type": "null" }] },
+        "started_at": {
+          "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+        },
+        "finished_at": {
+          "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+        },
+        "status": { "enum": ["planned", "succeeded", "reused", "skipped", "failed"] },
+        "estimated_cost_usd": { "type": "number", "minimum": 0 },
+        "actual_cost_usd": {
+          "anyOf": [{ "type": "number", "minimum": 0 }, { "type": "null" }]
+        },
+        "inputs": { "type": "array", "items": { "type": "string" } },
+        "outputs": { "type": "array", "items": { "type": "string" } },
+        "is_placeholder": {
+          "type": "boolean",
+          "description": "true = output do mock sinh ra, KHÔNG phải media thật."
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

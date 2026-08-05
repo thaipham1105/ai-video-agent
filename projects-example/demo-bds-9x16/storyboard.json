@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "project_id": "demo-bds-9x16",
+  "created_at": "2026-08-04T09:30:00Z",
+  "language": "vi",
+  "aspect_ratio": "9:16",
+  "scenes": [
+    {
+      "id": "scene-01",
+      "title": "Mở đầu",
+      "role": "hook",
+      "shots": [
+        {
+          "id": "shot-001",
+          "order": 0,
+          "duration_sec": 9.067,
+          "narration_vi": "Bán lô đất thổ cư mặt tiền đường nhựa 8m tại TP. Biên Hoà, Đồng Nai.",
+          "on_screen_text": [
+            {
+              "text": "thổ cư",
+              "kind": "legal",
+              "start_offset_sec": 0.0,
+              "duration_sec": null,
+              "exact": true
+            }
+          ],
+          "broll": {
+            "kind": "none",
+            "asset_id": null,
+            "prompt_vi": null,
+            "notes": ""
+          },
+          "provider_hint": "duix",
+          "subtitle": true,
+          "narration_audio_asset_id": null
+        }
+      ]
+    },
+    {
+      "id": "scene-02",
+      "title": "Nội dung",
+      "role": "body",
+      "shots": [
+        {
+          "id": "shot-002",
+          "order": 1,
+          "duration_sec": 9.6,
+          "narration_vi": "Diện tích 100m2, ngang 5m dài 20m, sổ hồng riêng, công chứng trong ngày.",
+          "on_screen_text": [
+            {
+              "text": "sổ hồng riêng",
+              "kind": "legal",
+              "start_offset_sec": 0.0,
+              "duration_sec": null,
+              "exact": true
+            },
+            {
+              "text": "công chứng",
+              "kind": "legal",
+              "start_offset_sec": 0.0,
+              "duration_sec": null,
+              "exact": true
+            }
+          ],
+          "broll": {
+            "kind": "none",
+            "asset_id": null,
+            "prompt_vi": null,
+            "notes": ""
+          },
+          "provider_hint": "duix",
+          "subtitle": true,
+          "narration_audio_asset_id": null
+        },
+        {
+          "id": "shot-003",
+          "order": 2,
+          "duration_sec": 6.533,
+          "narration_vi": "Giá chỉ 1,2 tỷ, thương lượng cho khách thiện chí.",
+          "on_screen_text": [
+            {
+              "text": "1,2 tỷ",
+              "kind": "price",
+              "start_offset_sec": 0.0,
+              "duration_sec": null,
+              "exact": true
+            }
+          ],
+          "broll": {
+            "kind": "none",
+            "asset_id": null,
+            "prompt_vi": null,
+            "notes": ""
+          },
+          "provider_hint": "duix",
+          "subtitle": true,
+          "narration_audio_asset_id": null
+        },
+        {
+          "id": "shot-004",
+          "order": 3,
+          "duration_sec": 9.067,
+          "narration_vi": "Khu dân cư hiện hữu, gần chợ và trường tiểu học, xe hơi vào tận nơi.",
+          "on_screen_text": [],
+          "broll": {
+            "kind": "none",
+            "asset_id": null,
+            "prompt_vi": null,
+            "notes": ""
+          },
+          "provider_hint": "duix",
+          "subtitle": true,
+          "narration_audio_asset_id": null
+        }
+      ]
+    },
+    {
+      "id": "scene-03",
+      "title": "Kêu gọi hành động",
+      "role": "cta",
+      "shots": [
+        {
+          "id": "shot-005",
+          "order": 4,
+          "duration_sec": 5.733,
+          "narration_vi": "Liên hệ 0909123456 để xem đất ngay hôm nay.",
+          "on_screen_text": [
+            {
+              "text": "0909123456",
+              "kind": "phone",
+              "start_offset_sec": 0.0,
+              "duration_sec": null,
+              "exact": true
+            },
+            {
+              "text": "Liên hệ ngay để được tư vấn",
+              "kind": "cta",
+              "start_offset_sec": 0.0,
+              "duration_sec": null,
+              "exact": true
+            }
+          ],
+          "broll": {
+            "kind": "none",
+            "asset_id": null,
+            "prompt_vi": null,
+            "notes": ""
+          },
+          "provider_hint": "duix",
+          "subtitle": true,
+          "narration_audio_asset_id": null
+        }
+      ]
+    }
+  ]
+}

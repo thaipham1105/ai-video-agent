@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-video-agent.local/schemas/asset-manifest.schema.json",
+  "title": "AssetManifest",
+  "description": "asset-manifest.json — đường dẫn tương đối, SHA-256, loại tài sản, chủ sở hữu, trạng thái đồng ý sử dụng (brief §7).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_id", "assets"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "assets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/asset" }
+    }
+  },
+  "$defs": {
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "sha256", "kind", "bytes", "consent"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$" },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Đường dẫn TƯƠNG ĐỐI so với thư mục assets của project. Không được tuyệt đối, không được chứa '..'.",
+          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|/)\\.\\.(/|$)).+$"
+        },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "kind": {
+          "enum": ["voice_sample", "avatar_source", "image", "broll", "logo", "music", "font"]
+        },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "consent": { "$ref": "#/$defs/consent" },
+        "source": { "type": "string" },
+        "notes": { "type": "string" }
+      }
+    },
+    "consent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "owner"],
+      "properties": {
+        "status": { "enum": ["granted", "pending", "denied", "not_required"] },
+        "owner": { "type": "string", "minLength": 1 },
+        "granted_by": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "granted_at": {
+          "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+        },
+        "scope": { "type": "string" },
+        "evidence_ref": {
+          "type": "string",
+          "description": "CHỈ là con trỏ tới hồ sơ đồng ý nằm ngoài repo. Không nhúng nội dung bằng chứng."
+        }
+      }
+    }
+  }
+}

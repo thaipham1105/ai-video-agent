@@ -1,0 +1,19 @@
+# Giữ dữ liệu runtime và môi trường ra khỏi index CodeGraph (brief §6).
+.venv/
+runtime/
+AI-VIDEO-AGENT-RUNTIME/
+projects/
+outputs/
+renders/
+artifacts/
+cache/
+models/
+voice-samples/
+avatar-sources/
+docker-data/
+duix_avatar_data/
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+node_modules/

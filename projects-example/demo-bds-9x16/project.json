@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "id": "demo-bds-9x16",
+  "title": "Đất thổ cư Biên Hoà 100m2",
+  "brief_vi": "Bán lô đất thổ cư mặt tiền đường nhựa 8m tại TP. Biên Hoà, Đồng Nai. Diện tích 100m2, ngang 5m dài 20m, sổ hồng riêng, công chứng trong ngày. Giá chỉ 1,2 tỷ, thương lượng cho khách thiện chí. Khu dân cư hiện hữu, gần chợ và trường tiểu học, xe hơi vào tận nơi. Liên hệ 0909123456 để xem đất ngay hôm nay.",
+  "language": "vi",
+  "aspect_ratio": "9:16",
+  "target_duration_sec": 40.0,
+  "fps": 30,
+  "budget": {
+    "currency": "USD",
+    "cap_usd": 0.0,
+    "spent_usd": 0.0,
+    "hard_stop": true
+  },
+  "providers": {
+    "tts": "vieneu",
+    "avatar": "duix",
+    "broll": "none",
+    "mode": "mock",
+    "voice_asset_id": null
+  },
+  "ai_disclosure": {
+    "enabled": true,
+    "label_vi": "Nội dung có sử dụng AI",
+    "burn_in": true
+  },
+  "state": "APPROVED",
+  "approval": {
+    "approved_by": "Chủ máy",
+    "approved_at": "2026-08-04T09:30:00Z",
+    "storyboard_sha256": "596b208b9dbbce07bad631a1ffce01c48fa2d8704d8d3f9f92412d0ca6de9cf7",
+    "note": "Đã xem lại thoại và chữ hiển thị."
+  },
+  "created_at": "2026-08-04T09:30:00Z",
+  "updated_at": "2026-08-04T09:30:00Z",
+  "history": [
+    {
+      "at": "2026-08-04T09:30:00Z",
+      "from_state": "DRAFT",
+      "to_state": "PLANNED",
+      "reason": "aiva plan"
+    },
+    {
+      "at": "2026-08-04T09:30:00Z",
+      "from_state": "PLANNED",
+      "to_state": "APPROVED",
+      "reason": "aiva approve"
+    }
+  ]
+}
