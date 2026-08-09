@@ -69,3 +69,40 @@ class ProviderError(AivaError):
 
 class ComposeError(AivaError):
     """Bước ghép video thất bại."""
+
+
+class CapabilityError(AivaError):
+    """Cấu hình không khớp năng lực đã xác minh của model.
+
+    Ném ra **trước** khi chạm tới provider, để một cấu hình sai không bao giờ
+    biến thành một lần gọi có thể bị tính tiền (D05C §4.2).
+    """
+
+
+class PriceUnverifiedError(AivaError):
+    """Bảng giá thiếu nguồn, quá hạn kiểm chứng hoặc không khớp khoá.
+
+    Cổng giá chạy theo nguyên tắc *fail-closed*: thà dừng còn hơn đoán một con
+    số rồi tiêu tiền dựa trên nó (D05C §6.2).
+    """
+
+
+class SubmissionUnknownError(AivaError):
+    """Không biết provider đã nhận yêu cầu hay chưa.
+
+    Xảy ra khi tiến trình chết sau khi ghi ``SUBMITTING`` nhưng trước khi lưu
+    được ``operation_name``. **Tuyệt đối không tự gửi lại** — phải đối chiếu thủ
+    công (D05C §5.2, §5.4).
+    """
+
+
+class BrollQcFailedError(AivaError):
+    """Clip B-roll trượt kiểm tra QC tự động nên không được vào composer."""
+
+
+class HumanApprovalRequiredError(AivaError):
+    """Shot chưa có người duyệt.
+
+    QC tự động chỉ có quyền TỪ CHỐI, không bao giờ có quyền chấp nhận thay
+    người (D05C §7.5).
+    """

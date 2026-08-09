@@ -46,6 +46,13 @@ class RenderRecord(BaseModel):
     actual_cost_usd: float | None = Field(default=None, ge=0.0)
     inputs: list[str] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
+    #: Provider này có TÍNH TIỀN tại thời điểm chạy hay không. Ghi lại vì cấu
+    #: hình project có thể đổi sau đó; artifact đã trả tiền thì vẫn là artifact
+    #: đã trả tiền, bất kể sau này project trỏ sang provider local.
+    billable: bool = False
+    #: Artifact này có bắt buộc người duyệt trước khi vào composer hay không.
+    #: Cùng lý do: đây là tính chất **của run**, không phải của cấu hình hiện tại.
+    requires_human_approval: bool = False
     #: ``True`` khi output do mock sinh ra — KHÔNG phải video/audio thật.
     is_placeholder: bool = False
     message: str = ""
@@ -64,7 +71,11 @@ class RenderManifest(BaseModel):
     storyboard_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     created_at: datetime = Field(default_factory=now_utc)
     finished_at: datetime | None = None
-    status: Literal["planned", "running", "succeeded", "failed"] = "planned"
+    #: ``awaiting_approval`` là tạm dừng có chủ đích khi B-roll trả phí chưa được
+    #: người duyệt — cố ý tách khỏi ``failed`` để không bị đọc nhầm thành lỗi provider.
+    status: Literal[
+        "planned", "running", "succeeded", "failed", "awaiting_approval"
+    ] = "planned"
     records: list[RenderRecord] = Field(default_factory=list)
     estimated_cost_usd: float = Field(default=0.0, ge=0.0)
     actual_cost_usd: float = Field(default=0.0, ge=0.0)

@@ -390,6 +390,67 @@ def render(
         console.print(f"[dim]• {warning}[/dim]")
 
 
+# --------------------------------------------------------- render-resume -----
+
+
+@app.command("render-resume")
+def render_resume(
+    project_id: Annotated[str, typer.Argument(help="ID project.")],
+    run_id: Annotated[str, typer.Argument(help="Run đang chờ duyệt, xem ở 'aiva status'.")],
+) -> None:
+    """Ghép lại từ artifact CÓ SẴN của một run đã tạm dừng chờ duyệt B-roll.
+
+    Không gọi lại TTS, avatar hay B-roll provider — mọi thứ tốn tiền đã xảy ra ở
+    run gốc. Đây là lý do lệnh này tồn tại riêng thay vì để ``render`` tự đoán:
+    chạy lại ``render`` sẽ sinh clip mới và có thể trả tiền lần hai.
+
+    Chế độ lấy từ **manifest của run gốc**, không phải từ cờ dòng lệnh hay cấu
+    hình hiện tại: một run chạy thật thì ghép thật, một run mock thì ghép mock.
+    Cho cờ ngoài quyết định sẽ khiến bản chất run gốc bị đổi sau lưng người dùng.
+    """
+    repo = _repo()
+    config = Config.from_env()
+    try:
+        project = repo.load_project(project_id)
+        storyboard = repo.load_storyboard(project_id)
+        assets = repo.load_assets(project_id)
+
+        # Đọc manifest TRƯỚC để biết run này là gì, rồi mới chọn composer.
+        original = repo.load_render_manifest(project_id, run_id)
+        if original.status != "awaiting_approval":
+            _fail(
+                f"Run {run_id} đang ở trạng thái '{original.status}'. "
+                "Chỉ resume được run đang chờ duyệt ('awaiting_approval')."
+            )
+            return
+        if original.dry_run:
+            _fail(f"Run {run_id} là dry-run nên không có artifact nào để ghép.")
+            return
+
+        composer = (
+            FfmpegComposer(ffmpeg_bin=config.ffmpeg_bin)
+            if original.provider_mode is ProviderMode.REAL
+            else MockComposer()
+        )
+        # KHÔNG build_provider_set: resume không được gọi provider nào, nên
+        # Pipeline ở đây cố tình dựng KHÔNG có provider. Nếu có đường code nào
+        # lỡ gọi provider, nó sẽ ném ConfigError chứ không âm thầm tiêu tiền.
+        pipeline = Pipeline(repository=repo, config=config, composer=composer)
+        manifest = pipeline.resume(project, storyboard, assets, run_id)
+    except (AivaError, ValueError) as exc:
+        _fail(str(exc))
+        return
+
+    console.print(
+        f"[green]✓[/green] RESUME — run [bold]{manifest.run_id}[/bold] ({manifest.status}, "
+        f"mode={manifest.provider_mode.value} theo run gốc)"
+    )
+    if manifest.outputs:
+        console.print(f"Output: {manifest.outputs[0]}")
+    for warning in manifest.warnings:
+        console.print(f"[dim]• {warning}[/dim]")
+
+
 # ---------------------------------------------------------------- status -----
 
 

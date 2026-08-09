@@ -27,7 +27,10 @@ ALLOWED_TRANSITIONS: Mapping[ProjectState, frozenset[ProjectState]] = {
     S.DRAFT: frozenset({S.PLANNED, S.FAILED}),
     S.PLANNED: frozenset({S.PLANNED, S.APPROVED, S.FAILED}),
     S.APPROVED: frozenset({S.PLANNED, S.RENDERING, S.FAILED}),
-    S.RENDERING: frozenset({S.COMPOSED, S.FAILED}),
+    # RENDERING -> APPROVED là cạnh "tạm dừng chờ người duyệt": B-roll trả phí đã
+    # sinh xong và qua QC, nhưng chưa ai duyệt bằng mắt. Đó là điểm dừng có chủ
+    # đích, KHÔNG phải lỗi provider, nên không được đẩy project sang FAILED.
+    S.RENDERING: frozenset({S.COMPOSED, S.APPROVED, S.FAILED}),
     S.COMPOSED: frozenset({S.DONE, S.RENDERING, S.FAILED}),
     S.DONE: frozenset({S.RENDERING, S.PLANNED}),
     S.FAILED: frozenset({S.PLANNED, S.RENDERING}),

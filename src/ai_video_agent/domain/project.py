@@ -14,6 +14,15 @@ from ai_video_agent.domain.state import assert_transition
 PROJECT_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{1,62}$"
 
 
+class ChargedRun(BaseModel):
+    """Dấu vết một lần chạy đã được hạch toán vào ngân sách."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    usd: float = Field(default=0.0, ge=0.0)
+    at: datetime
+
+
 class BudgetPolicy(BaseModel):
     """Trần ngân sách của project.
 
@@ -27,6 +36,27 @@ class BudgetPolicy(BaseModel):
     cap_usd: float = Field(default=0.0, ge=0.0)
     spent_usd: float = Field(default=0.0, ge=0.0)
     hard_stop: bool = True
+    #: ``run_id`` -> dấu vết hạch toán. Đây là thứ làm cho việc cộng tiền
+    #: **idempotent**: resume, thử lại resume, hay crash rồi chạy lại đều không
+    #: cộng lần hai, vì khoá đã nằm sẵn ở đây.
+    charged_runs: dict[str, ChargedRun] = Field(default_factory=dict)
+
+    def charge_once(self, run_id: str, usd: float, at: datetime) -> bool:
+        """Hạch toán chi phí của một run **đúng một lần**.
+
+        Trả về ``True`` nếu lần này thực sự cộng, ``False`` nếu run đó đã được
+        hạch toán trước đó. Tiền đã tiêu ở lúc gọi provider, nên phải ghi ngay
+        khi biết — kể cả khi lần chạy dừng giữa chừng để chờ người duyệt.
+        """
+        if run_id in self.charged_runs:
+            return False
+        amount = round(usd, 4)
+        self.charged_runs[run_id] = ChargedRun(usd=amount, at=at)
+        self.spent_usd = round(self.spent_usd + amount, 4)
+        return True
+
+    def already_charged(self, run_id: str) -> bool:
+        return run_id in self.charged_runs
 
     @property
     def remaining_usd(self) -> float:

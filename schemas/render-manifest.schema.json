@@ -30,7 +30,7 @@
     "finished_at": {
       "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
     },
-    "status": { "enum": ["planned", "running", "succeeded", "failed"] },
+    "status": { "enum": ["planned", "running", "succeeded", "failed", "awaiting_approval"] },
     "records": {
       "type": "array",
       "items": { "$ref": "#/$defs/record" }
@@ -74,6 +74,14 @@
         "is_placeholder": {
           "type": "boolean",
           "description": "true = output do mock sinh ra, KHÔNG phải media thật."
+        },
+        "billable": {
+          "type": "boolean",
+          "description": "Provider có tính tiền tại LÚC CHẠY. Bất biến theo run, không suy từ cấu hình hiện tại."
+        },
+        "requires_human_approval": {
+          "type": "boolean",
+          "description": "Artifact bắt buộc người duyệt trước composer. Tính chất của run, không phải của cấu hình hiện tại."
         },
         "message": { "type": "string" }
       }

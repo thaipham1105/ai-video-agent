@@ -57,7 +57,20 @@
         "currency": { "const": "USD" },
         "cap_usd": { "type": "number", "minimum": 0 },
         "spent_usd": { "type": "number", "minimum": 0 },
-        "hard_stop": { "type": "boolean" }
+        "hard_stop": { "type": "boolean" },
+        "charged_runs": {
+          "type": "object",
+          "description": "run_id -> dấu vết hạch toán. Khoá làm cho việc cộng tiền idempotent theo run.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["usd", "at"],
+            "properties": {
+              "usd": { "type": "number", "minimum": 0 },
+              "at": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
       }
     },
     "providers": {

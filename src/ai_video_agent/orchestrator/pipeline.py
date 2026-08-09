@@ -14,6 +14,7 @@ Ba tính chất được thiết kế có chủ đích:
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -42,7 +43,13 @@ from ai_video_agent.domain.enums import (
 from ai_video_agent.domain.project import Project
 from ai_video_agent.domain.render import RenderManifest, RenderRecord
 from ai_video_agent.domain.storyboard import Shot, Storyboard
-from ai_video_agent.errors import ConsentMissingError, ValidationError
+from ai_video_agent.errors import (
+    BrollQcFailedError,
+    ConfigError,
+    ConsentMissingError,
+    HumanApprovalRequiredError,
+    ValidationError,
+)
 from ai_video_agent.orchestrator import costguard
 from ai_video_agent.orchestrator.estimator import Estimate, estimate_storyboard
 from ai_video_agent.orchestrator.repository import ProjectRepository
@@ -50,10 +57,13 @@ from ai_video_agent.providers._placeholder import read_wav_duration
 from ai_video_agent.providers.base import (
     AvatarRequest,
     BrollRequest,
+    BrollResult,
     ProviderInfo,
     ProviderSet,
     TtsRequest,
 )
+from ai_video_agent.qc.approval import assert_shot_approved, qc_report_path_for
+from ai_video_agent.qc.broll import run_qc
 
 #: Khoảng cách dọc giữa hai lớp chữ chính xác xếp chồng.
 _TEXT_STACK_STEP = 70
@@ -85,6 +95,11 @@ class _ShotArtifacts:
     video: Path
     broll: Path | None = None
     start_sec: float = 0.0
+    #: Lấy từ provider **lúc sinh**, hoặc từ nhật ký run gốc khi resume. Cố ý
+    #: KHÔNG hỏi ``self._provider_set`` ở thời điểm ghép: đổi cấu hình project sang
+    #: provider local sau khi đã trả tiền không được biến artifact trả phí thành
+    #: artifact miễn kiểm duyệt.
+    broll_requires_approval: bool = False
 
 
 @dataclass
@@ -92,16 +107,31 @@ class Pipeline:
     """Điều phối TTS -> avatar -> (B-roll) -> phụ đề -> ghép."""
 
     repository: ProjectRepository
-    providers: ProviderSet
     config: Config
+    #: ``None`` là hợp lệ và có ý nghĩa: đường :meth:`resume` **không được phép**
+    #: gọi provider nào, nên nó cũng không cần provider nào. Dựng Pipeline không
+    #: có provider là cách biến ràng buộc đó thành thứ máy tự thực thi thay vì
+    #: một lời hứa trong tài liệu.
+    providers: ProviderSet | None = None
     composer: Composer = field(default_factory=MockComposer)
     now: Callable[[], datetime] = now_utc
     make_run_id: Callable[[], str] = new_run_id
 
+    @property
+    def _provider_set(self) -> ProviderSet:
+        """Provider set cho đường render. Ném lỗi rõ nếu ai đó quên truyền."""
+        if self.providers is None:
+            msg = (
+                "Pipeline này được dựng KHÔNG có provider (chế độ resume). "
+                "Đường render cần provider — dựng lại Pipeline với providers=..."
+            )
+            raise ConfigError(msg)
+        return self.providers
+
     # ----- ước tính ------------------------------------------------------------
 
     def estimate(self, project: Project, storyboard: Storyboard) -> Estimate:
-        return estimate_storyboard(project, storyboard, self.providers)
+        return estimate_storyboard(project, storyboard, self._provider_set)
 
     # ----- render --------------------------------------------------------------
 
@@ -158,8 +188,8 @@ class Pipeline:
     ) -> None:
         """Ghi kế hoạch từng bước mà không gọi bất kỳ provider nào."""
         cost_by_key = {(line.stage, line.provider): line.estimated_usd for line in estimate.lines}
-        tts_info = self.providers.tts.info()
-        avatar_info = self.providers.avatar.info()
+        tts_info = self._provider_set.tts.info()
+        avatar_info = self._provider_set.avatar.info()
 
         for shot in storyboard.shots:
             manifest.add(
@@ -188,8 +218,8 @@ class Pipeline:
                     message="Dry-run: chưa gọi provider.",
                 )
             )
-            if shot.broll.kind is not BrollKind.NONE and self.providers.broll is not None:
-                broll_info = self.providers.broll.info()
+            if shot.broll.kind is not BrollKind.NONE and self._provider_set.broll is not None:
+                broll_info = self._provider_set.broll.info()
                 manifest.add(
                     RenderRecord(
                         stage=RenderStage.BROLL,
@@ -249,6 +279,36 @@ class Pipeline:
             artifacts = self._render_shots(manifest, project, storyboard, assets, opts)
             subtitles = self._write_subtitles(manifest, run_dir, artifacts)
             output = self._compose(manifest, project, assets, artifacts, subtitles)
+        except (HumanApprovalRequiredError, BrollQcFailedError) as exc:
+            # Tạm dừng CÓ CHỦ ĐÍCH, không phải lỗi provider. Artifact đã sinh xong
+            # và đã tốn tiền; đẩy project sang FAILED sẽ khiến người dùng tưởng
+            # phải chạy lại từ đầu, mà chạy lại là trả tiền lần hai.
+            manifest.status = "awaiting_approval"
+            manifest.finished_at = self.now()
+            # Tiền đã tiêu ở lúc gọi provider, KHÔNG phải lúc ghép. Chờ tới resume
+            # mới hạch toán là để ngân sách nói dối trong suốt thời gian chờ duyệt.
+            manifest.actual_cost_usd = self._sum_actual_cost(manifest)
+            manifest.warnings.append(
+                f"Tạm dừng chờ người duyệt B-roll: {exc} "
+                f"Sau khi duyệt, chạy: aiva render-resume {project.id} {manifest.run_id}"
+            )
+            self.repository.save_render_manifest(manifest)
+            charged = project.budget.charge_once(
+                manifest.run_id, manifest.actual_cost_usd, self.now()
+            )
+            manifest.warnings.append(
+                f"Hạch toán run {manifest.run_id}: {manifest.actual_cost_usd} USD"
+                if charged
+                else f"Run {manifest.run_id} đã được hạch toán trước đó, không cộng lại."
+            )
+            self.repository.save_render_manifest(manifest)
+            project.transition_to(
+                ProjectState.APPROVED,
+                reason=f"chờ duyệt B-roll của run {manifest.run_id}",
+                at=self.now(),
+            )
+            self.repository.save_project(project)
+            raise
         except Exception as exc:
             manifest.status = "failed"
             manifest.finished_at = self.now()
@@ -261,16 +321,20 @@ class Pipeline:
         manifest.status = "succeeded"
         manifest.finished_at = self.now()
         manifest.outputs = [str(output)]
-        manifest.actual_cost_usd = round(
-            sum(record.actual_cost_usd or 0.0 for record in manifest.records), 4
-        )
+        manifest.actual_cost_usd = self._sum_actual_cost(manifest)
         self.repository.save_render_manifest(manifest)
 
         project.transition_to(ProjectState.COMPOSED, reason="ghép xong", at=self.now())
         project.transition_to(ProjectState.DONE, reason=f"output {output.name}", at=self.now())
-        project.budget.spent_usd = round(project.budget.spent_usd + manifest.actual_cost_usd, 4)
+        # Idempotent theo run: nếu run này đã bị hạch toán lúc tạm dừng trước đó
+        # thì không cộng lần hai.
+        project.budget.charge_once(manifest.run_id, manifest.actual_cost_usd, self.now())
         self.repository.save_project(project)
         return manifest
+
+    @staticmethod
+    def _sum_actual_cost(manifest: RenderManifest) -> float:
+        return round(sum(record.actual_cost_usd or 0.0 for record in manifest.records), 4)
 
     def _render_shots(
         self,
@@ -299,8 +363,8 @@ class Pipeline:
             else None
         )
 
-        tts_info = self.providers.tts.info()
-        avatar_info = self.providers.avatar.info()
+        tts_info = self._provider_set.tts.info()
+        avatar_info = self._provider_set.avatar.info()
         results: list[_ShotArtifacts] = []
         cursor = 0.0
 
@@ -354,7 +418,7 @@ class Pipeline:
                 )
             else:
                 started = self.now()
-                tts_result = self.providers.tts.synthesize(
+                tts_result = self._provider_set.tts.synthesize(
                     TtsRequest(
                         shot_id=shot.id,
                         text_vi=shot.narration_vi,
@@ -393,7 +457,7 @@ class Pipeline:
                 )
             else:
                 started = self.now()
-                avatar_result = self.providers.avatar.generate(
+                avatar_result = self._provider_set.avatar.generate(
                     AvatarRequest(
                         shot_id=shot.id,
                         audio_path=audio_path,
@@ -432,11 +496,12 @@ class Pipeline:
                 )
 
             broll_path: Path | None = None
-            if shot.broll.kind is not BrollKind.NONE and self.providers.broll is not None:
-                broll_info = self.providers.broll.info()
-                broll_path = cache / broll_name
+            broll_requires_approval = False
+            if shot.broll.kind is not BrollKind.NONE and self._provider_set.broll is not None:
+                broll_info = self._provider_set.broll.info()
+                requested_broll = cache / broll_name
                 started = self.now()
-                broll_result = self.providers.broll.generate(
+                broll_result = self._provider_set.broll.generate(
                     BrollRequest(
                         shot_id=shot.id,
                         prompt_vi=shot.broll.prompt_vi or shot.narration_vi,
@@ -445,21 +510,30 @@ class Pipeline:
                         height=height,
                         fps=project.fps,
                     ),
-                    broll_path,
+                    requested_broll,
                 )
-                manifest.add(
-                    self._record(
-                        RenderStage.BROLL,
-                        shot.id,
-                        broll_info,
-                        StageStatus.SUCCEEDED,
-                        started_at=started,
-                        finished_at=self.now(),
-                        outputs=[str(broll_result.path)],
-                        is_placeholder=broll_result.is_placeholder,
-                        actual_cost_usd=broll_result.actual_cost_usd,
-                    )
+                # Dùng đường provider THỰC SỰ ghi, không phải đường ta yêu cầu.
+                # Duix từng ghi ra chỗ khác rồi trả về đường thật qua kết quả;
+                # tin vào đường yêu cầu sẽ khiến QC soi nhầm file hoặc soi file rỗng.
+                broll_path = Path(broll_result.path)
+                broll_requires_approval = broll_info.billable
+                qc_report = self._run_broll_qc(broll_info, broll_path, broll_result)
+                record = self._record(
+                    RenderStage.BROLL,
+                    shot.id,
+                    broll_info,
+                    StageStatus.SUCCEEDED,
+                    started_at=started,
+                    finished_at=self.now(),
+                    outputs=[str(broll_result.path)],
+                    is_placeholder=broll_result.is_placeholder,
+                    actual_cost_usd=broll_result.actual_cost_usd,
+                    message=(f"QC: {qc_report}" if qc_report else ""),
                 )
+                # Đóng dấu provenance vào nhật ký: đây là sự thật của RUN NÀY.
+                record.billable = broll_info.billable
+                record.requires_human_approval = broll_requires_approval
+                manifest.add(record)
 
             results.append(
                 _ShotArtifacts(
@@ -469,6 +543,7 @@ class Pipeline:
                     video=video_path,
                     broll=broll_path,
                     start_sec=round(cursor, 3),
+                    broll_requires_approval=broll_requires_approval,
                 )
             )
             cursor += duration
@@ -516,6 +591,268 @@ class Pipeline:
         )
         return path
 
+    # ----- resume ---------------------------------------------------------------
+
+    def resume(
+        self,
+        project: Project,
+        storyboard: Storyboard,
+        assets: AssetManifest,
+        run_id: str,
+    ) -> RenderManifest:
+        """Ghép lại từ artifact CÓ SẴN của một run đã tạm dừng chờ duyệt.
+
+        Đây là đường đi riêng, không phải ``render`` ngầm đổi hành vi. Nó **không
+        gọi** TTS, avatar, B-roll provider, transport hay cost guard cho lần chạy
+        thật — vì mọi thứ tốn tiền đã xảy ra ở run gốc rồi. Gọi lại chúng chính là
+        thứ khiến người dùng trả tiền lần hai.
+
+        Fail-closed ở mọi điểm nghi ngờ: storyboard đổi, thiếu artifact, báo cáo QC
+        thiếu hoặc cũ, clip đổi dù một byte — đều dừng, không ghép.
+        """
+        original = self.repository.load_render_manifest(project.id, run_id)
+
+        if original.status != "awaiting_approval":
+            msg = (
+                f"Run {run_id} đang ở trạng thái {original.status!r}, chỉ resume được run "
+                "'awaiting_approval'. Resume không phải cách chạy lại một run đã xong, "
+                "đã hỏng, hay chưa từng thực thi."
+            )
+            raise ValidationError(msg)
+
+        if original.storyboard_sha256 != storyboard.sha256():
+            msg = (
+                f"Storyboard đã đổi kể từ run {run_id} "
+                f"(run ghi {original.storyboard_sha256[:16]}…, hiện tại "
+                f"{storyboard.sha256()[:16]}…). Artifact cũ không còn khớp kịch bản — "
+                "phải render lại thay vì resume."
+            )
+            raise ValidationError(msg)
+
+        if original.dry_run:
+            msg = f"Run {run_id} là dry-run nên không có artifact nào để ghép."
+            raise ValidationError(msg)
+
+        artifacts = self._restore_artifacts(original, storyboard)
+
+        manifest = RenderManifest(
+            project_id=project.id,
+            run_id=run_id,
+            dry_run=False,
+            provider_mode=original.provider_mode,
+            storyboard_sha256=original.storyboard_sha256,
+            created_at=self.now(),
+            status="running",
+            estimated_cost_usd=original.estimated_cost_usd,
+            # Mang theo chi phí đã hạch toán ở lần pause NGAY TỪ ĐẦU. Nếu resume
+            # bị chặn ở QC/duyệt, nhánh except lưu manifest này đè lên bản cũ —
+            # để mặc định 0.0 là xoá mất dấu vết của tiền đã tiêu thật.
+            actual_cost_usd=original.actual_cost_usd,
+            ai_disclosure_applied=original.ai_disclosure_applied,
+            tool_versions=self._tool_versions(),
+            # Giữ nguyên nhật ký của run gốc: đây là cùng một run được nối tiếp,
+            # không phải một lần chạy mới.
+            records=list(original.records),
+            warnings=[
+                *original.warnings,
+                f"RESUME: ghép lại từ artifact có sẵn của run {run_id}. "
+                "Không gọi lại TTS/avatar/B-roll provider.",
+            ],
+        )
+        for item in artifacts:
+            manifest.warnings.append(
+                f"RESUME dùng shot {item.shot.id}: audio={item.audio.name}, "
+                f"video={item.video.name}"
+                + (f", broll={item.broll.name}" if item.broll else "")
+            )
+
+        run_dir = self.repository.paths(project.id).run_dir(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        project.transition_to(
+            ProjectState.RENDERING, reason=f"resume {run_id}", at=self.now()
+        )
+        self.repository.save_project(project)
+
+        try:
+            subtitles = self._write_subtitles(manifest, run_dir, artifacts)
+            output = self._compose(manifest, project, assets, artifacts, subtitles)
+        except (HumanApprovalRequiredError, BrollQcFailedError) as exc:
+            manifest.status = "awaiting_approval"
+            manifest.finished_at = self.now()
+            manifest.warnings.append(f"Resume vẫn bị chặn: {exc}")
+            self.repository.save_render_manifest(manifest)
+            project.transition_to(
+                ProjectState.APPROVED, reason="resume bị chặn", at=self.now()
+            )
+            self.repository.save_project(project)
+            raise
+        except Exception as exc:
+            manifest.status = "failed"
+            manifest.finished_at = self.now()
+            manifest.warnings.append(f"Resume thất bại: {exc}")
+            self.repository.save_render_manifest(manifest)
+            project.transition_to(ProjectState.FAILED, reason=str(exc)[:200], at=self.now())
+            self.repository.save_project(project)
+            raise
+
+        manifest.status = "succeeded"
+        manifest.finished_at = self.now()
+        manifest.outputs = [str(output)]
+        # KHÔNG cộng chi phí lần nữa. Run gốc đã hạch toán lúc tạm dừng; ngân sách
+        # project đã phản ánh đúng từ lúc đó. Resume không gọi provider nên không
+        # tiêu thêm đồng nào, và cũng KHÔNG chạm tới costguard execution.
+        manifest.actual_cost_usd = original.actual_cost_usd
+        manifest.warnings.append(
+            f"Chi phí giữ nguyên {original.actual_cost_usd} USD của run gốc; "
+            f"đã hạch toán từ trước: {project.budget.already_charged(run_id)}."
+        )
+        self.repository.save_render_manifest(manifest)
+
+        project.transition_to(ProjectState.COMPOSED, reason="resume ghép xong", at=self.now())
+        project.transition_to(ProjectState.DONE, reason=f"output {output.name}", at=self.now())
+        self.repository.save_project(project)
+        return manifest
+
+    def _restore_artifacts(
+        self, original: RenderManifest, storyboard: Storyboard
+    ) -> list[_ShotArtifacts]:
+        """Dựng lại ``_ShotArtifacts`` từ nhật ký đã persist. Không sinh lại gì."""
+        by_shot: dict[str, dict[RenderStage, Path]] = {}
+        #: Provenance đọc từ nhật ký run gốc, KHÔNG suy từ cấu hình hiện tại.
+        needs_approval: dict[str, bool] = {}
+        for record in original.records:
+            if record.shot_id is None or not record.outputs:
+                continue
+            if record.stage in {RenderStage.TTS, RenderStage.AVATAR, RenderStage.BROLL}:
+                by_shot.setdefault(record.shot_id, {})[record.stage] = Path(record.outputs[0])
+            if record.stage is RenderStage.BROLL:
+                needs_approval[record.shot_id] = bool(
+                    record.requires_human_approval or record.billable
+                )
+
+        restored: list[_ShotArtifacts] = []
+        cursor = 0.0
+        for shot in storyboard.shots:
+            found = by_shot.get(shot.id)
+            if not found:
+                msg = (
+                    f"Run {original.run_id} không có artifact nào cho shot {shot.id}. "
+                    "Không ghép từ dữ liệu thiếu."
+                )
+                raise ValidationError(msg)
+
+            audio = found.get(RenderStage.TTS)
+            video = found.get(RenderStage.AVATAR)
+            if audio is None or video is None:
+                msg = f"Shot {shot.id} thiếu audio hoặc video trong run {original.run_id}."
+                raise ValidationError(msg)
+            for kind, path in (("audio", audio), ("video", video)):
+                if not path.is_file():
+                    msg = (
+                        f"Artifact {kind} của shot {shot.id} không còn trên đĩa: {path}. "
+                        "Không ghép từ artifact thiếu."
+                    )
+                    raise ValidationError(msg)
+
+            broll = found.get(RenderStage.BROLL)
+            if broll is not None and not broll.is_file():
+                msg = (
+                    f"B-roll của shot {shot.id} không còn trên đĩa: {broll}. "
+                    "Không ghép từ artifact thiếu."
+                )
+                raise ValidationError(msg)
+
+            duration = read_wav_duration(audio)
+            restored.append(
+                _ShotArtifacts(
+                    shot=shot,
+                    audio=audio,
+                    audio_duration_sec=duration,
+                    video=video,
+                    broll=broll,
+                    start_sec=round(cursor, 3),
+                    broll_requires_approval=needs_approval.get(shot.id, False),
+                )
+            )
+            cursor += duration
+        return restored
+
+    def _run_broll_qc(
+        self,
+        broll_info: ProviderInfo,
+        broll_path: Path,
+        broll_result: BrollResult,
+    ) -> str:
+        """Chạy QC local trên B-roll trả phí rồi ghi báo cáo cạnh chính clip.
+
+        Chỉ chạy cho provider **tính tiền**. Provider local hoặc mock có
+        ``billable=False`` nên không bị đụng — D04 giữ nguyên hành vi.
+
+        Đối chiếu file với **những gì provider tự khai** (``broll_result``), chứ
+        không phải với những gì pipeline yêu cầu. Provider có thể trả về thứ khác
+        yêu cầu một cách hợp lệ — Veo 3.1 luôn xuất 24 fps bất kể ta xin bao
+        nhiêu. Điều QC cần bắt là *provider khai một đằng, file một nẻo*.
+
+        ``human_approval`` luôn được ghi là ``None``. Không nhánh nào ở đây được
+        phép đặt giá trị khác: QC ``PASS`` chỉ nghĩa là không đo được lỗi, không
+        phải là duyệt thẩm mỹ.
+        """
+        if not broll_info.billable:
+            return ""
+
+        report = run_qc(
+            clip=broll_path,
+            ffmpeg=self.config.ffmpeg_bin,
+            ffprobe=self.config.ffprobe_bin,
+            want_width=broll_result.width,
+            want_height=broll_result.height,
+            want_fps=broll_result.fps,
+            want_duration_sec=broll_result.duration_sec,
+        )
+        report.human_approval = None  # bất biến: máy không tự duyệt
+        report_path = qc_report_path_for(broll_path)
+
+        # Phê duyệt gắn với NỘI DUNG clip. Nếu lần chạy này sinh ra đúng clip cũ
+        # (cùng sha256) thì giữ lại phê duyệt đã có — nếu không, mỗi lần render
+        # lại sẽ xoá sạch phê duyệt và người dùng không bao giờ đi qua được cổng.
+        # Clip đổi một byte là sha256 đổi, phê duyệt cũ mất hiệu lực ngay.
+        if report_path.is_file():
+            try:
+                previous = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                previous = {}
+            if previous.get("clip_sha256") and previous["clip_sha256"] == report.clip_sha256:
+                report.human_approval = previous.get("human_approval")
+
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report.to_json(), encoding="utf-8")
+        return f"{report.verdict}, human_approval={report.human_approval!r}"
+
+    def _assert_paid_broll_approved(self, artifacts: list[_ShotArtifacts]) -> None:
+        """Chặn composer khi B-roll trả phí chưa qua QC và chưa được người duyệt.
+
+        Chỉ áp cho B-roll sinh bởi provider **tính tiền**. Đường Duix/VieNeu và
+        mọi provider local đều có ``billable=False`` nên không bị đụng — D04 giữ
+        nguyên hành vi.
+
+        Ghi nhận trung thực về phạm vi: ở bản hiện tại ``_compose`` mới dựng
+        concat từ ``item.video``, **chưa** tiêu thụ ``item.broll``. Cổng này vì
+        vậy đặt ở ranh giới ngay trước composer để không một artifact trả phí nào
+        đi qua được mà thiếu duyệt, kể cả khi sau này composer bắt đầu dùng nó.
+
+        Quyết định "có cần duyệt không" lấy từ **provenance đã persist của run**
+        (:attr:`_ShotArtifacts.broll_requires_approval`), **không** hỏi
+        ``self._provider_set.broll``. Nếu hỏi provider hiện tại, chỉ cần đổi cấu hình
+        project sang provider local sau khi đã trả tiền là mọi artifact trả phí
+        lọt qua cổng — đúng loại lỗ hổng mà cổng này sinh ra để bịt.
+        """
+        for item in artifacts:
+            if item.broll is None or not item.broll_requires_approval:
+                continue
+            # Truyền cả clip để cổng tự băm lại tại đây, thay vì tin con số đã ghi
+            # lúc QC chạy. Clip có thể đã đổi giữa lúc duyệt và lúc ghép.
+            assert_shot_approved(qc_report_path_for(item.broll), item.broll)
+
     def _compose(
         self,
         manifest: RenderManifest,
@@ -524,6 +861,8 @@ class Pipeline:
         artifacts: list[_ShotArtifacts],
         subtitles: Path | None,
     ) -> Path:
+        self._assert_paid_broll_approved(artifacts)
+
         project_paths = self.repository.paths(project.id)
         run_dir = project_paths.run_dir(manifest.run_id)
         width, height = project.aspect_ratio.size
@@ -716,8 +1055,11 @@ class Pipeline:
             "ai_video_agent": __version__,
             "python": platform.python_version(),
         }
-        for info in self.providers.infos():
-            versions[f"provider:{info.name}"] = f"{info.model}@{info.version}"
+        # Resume dựng Pipeline không có provider — không có gì để liệt kê, và đó
+        # chính là điều cần ghi nhận: lần chạy này không chạm provider nào.
+        if self.providers is not None:
+            for info in self.providers.infos():
+                versions[f"provider:{info.name}"] = f"{info.model}@{info.version}"
         composer_info = self.composer.info()
         versions[f"composer:{composer_info.name}"] = (
             f"{composer_info.model}@{composer_info.version}"
