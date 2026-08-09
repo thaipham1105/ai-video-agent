@@ -124,6 +124,70 @@ def test_backend_local_khong_tinh_tien(label: str, factory: object, is_real: boo
     assert factory().info().billable is False  # type: ignore[operator]
 
 
+# --- Capability và ước tính tài nguyên (D04-B) ----------------------------
+
+
+@pytest.mark.parametrize(("label", "factory", "is_real"), AVATAR_BACKENDS)
+def test_capability_khai_du_khong_de_trong(
+    label: str, factory: object, is_real: bool
+) -> None:
+    del label, is_real
+    cap = factory().capability()  # type: ignore[operator]
+    assert cap.backend_id and cap.backend_version
+    assert cap.native_fps > 0
+    assert cap.native_fps in cap.supported_fps
+    assert cap.max_width > 0 and cap.max_height > 0
+    assert cap.audio_sample_rate_hz > 0
+    assert cap.audio_encoder, "phải khai bộ mã hoá tiếng"
+    assert cap.languages_verified, "phải khai ngôn ngữ đã kiểm chứng"
+    assert cap.accepts_image_source or cap.accepts_video_source
+    assert cap.requires_gate
+
+
+@pytest.mark.parametrize(("label", "factory", "is_real"), AVATAR_BACKENDS)
+def test_capability_khai_dung_gate_trong_info(
+    label: str, factory: object, is_real: bool
+) -> None:
+    """Hai chỗ khai gate phải khớp nhau, nếu không hàng rào sẽ mơ hồ."""
+    del label, is_real
+    provider = factory()  # type: ignore[operator]
+    assert provider.capability().requires_gate == provider.info().gate
+
+
+@pytest.mark.parametrize(("label", "factory", "is_real"), AVATAR_BACKENDS)
+def test_uoc_tinh_tai_nguyen_khong_bi_bo_trong(
+    label: str, factory: object, is_real: bool, tmp_path: Path
+) -> None:
+    """``ram_mib = 0`` gần như chắc chắn là quên khai, không phải sự thật."""
+    del label, is_real
+    est = factory().estimate_resources(_request(tmp_path))  # type: ignore[operator]
+    assert est.ram_mib > 0, "RAM 0 MiB là dấu hiệu quên khai"
+    assert est.vram_mib >= 0
+    assert est.storage_mib >= 0
+    assert isinstance(est.deterministic_local, bool)
+    if est.measured:
+        assert est.measured_on, "đã đo thì phải có ngày đo"
+
+
+@pytest.mark.parametrize(("label", "factory"), REAL_BACKENDS)
+def test_backend_that_phai_khai_vram_that(label: str, factory: object, tmp_path: Path) -> None:
+    """Backend GPU khai VRAM = 0 sẽ khiến hàng rào tài nguyên im lặng cho qua."""
+    del label
+    est = factory().estimate_resources(_request(tmp_path))  # type: ignore[operator]
+    assert est.vram_mib > 0, "adapter thật chạy GPU phải khai VRAM > 0"
+    assert est.measured, "số VRAM của backend thật phải là số ĐO, không phải chép tài liệu"
+
+
+@pytest.mark.parametrize(("label", "factory", "is_real"), AVATAR_BACKENDS)
+def test_estimate_resources_khong_cham_gpu_va_khong_can_file(
+    label: str, factory: object, is_real: bool, tmp_path: Path
+) -> None:
+    """Hỏi tài nguyên phải rẻ — chạy được cả khi chưa có WAV."""
+    del label, is_real
+    est = factory().estimate_resources(_request(tmp_path, with_audio=False))  # type: ignore[operator]
+    assert est is not None
+
+
 # --- Điều khoản riêng cho adapter THẬT ------------------------------------
 
 

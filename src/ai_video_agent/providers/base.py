@@ -16,7 +16,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from ai_video_agent.domain.assets import sha256_file
 from ai_video_agent.domain.enums import ProviderKind, ProviderMode, RenderStage
+
+
+def fingerprint_file(path: Path | None) -> str:
+    """Vân tay SHA-256 của một file đầu vào, dùng cho provenance.
+
+    Trả về chuỗi rỗng khi không có file. Provenance thà **thiếu** một trường còn
+    hơn mang một giá trị bịa: một băm sai còn tệ hơn không có băm, vì nó trông
+    như bằng chứng.
+    """
+    if path is None or not path.is_file():
+        return ""
+    return sha256_file(path)
 
 
 @dataclass(frozen=True)
@@ -94,6 +107,120 @@ class AvatarRequest:
 
 
 @dataclass(frozen=True)
+class ResourceEstimate:
+    """Tài nguyên một backend cần cho một lần chạy.
+
+    **Mọi trường đều bắt buộc.** Cố ý không cho mặc định 0: một backend quên khai
+    VRAM mà vẫn hợp lệ sẽ khiến hàng rào tài nguyên im lặng cho qua, và lỗi chỉ
+    lộ ra lúc OOM giữa chừng — sau khi đã tốn thời gian GPU.
+
+    ``measured`` phân biệt số **đo thật trên máy này** với số chép từ tài liệu
+    upstream. Bake-off D04 cho thấy khoảng cách đó là 34%: LatentSync 1.6 ghi
+    18 GB trong README nhưng đo thật 11.942 MiB. Tin tài liệu là loại nhầm một
+    ứng viên chạy được.
+    """
+
+    vram_mib: int
+    ram_mib: int
+    storage_mib: int
+    #: ``True`` khi cùng đầu vào + cùng seed cho ra cùng đầu ra, chạy hoàn toàn local.
+    deterministic_local: bool
+    #: ``True`` = đo thật trên máy này; ``False`` = ước tính từ tài liệu.
+    measured: bool
+    #: Ngày đo, dạng ISO. Rỗng khi ``measured=False``.
+    measured_on: str = ""
+
+    def __post_init__(self) -> None:
+        if self.vram_mib < 0 or self.ram_mib < 0 or self.storage_mib < 0:
+            msg = "Tài nguyên ước tính không được âm."
+            raise ValueError(msg)
+        if self.ram_mib == 0:
+            msg = "ram_mib = 0 gần như chắc chắn là quên khai, không phải sự thật."
+            raise ValueError(msg)
+        if self.measured and not self.measured_on:
+            msg = "measured=True thì phải có measured_on — không có ngày thì số liệu vô nghĩa."
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True)
+class AvatarCapability:
+    """Năng lực đã xác minh của một backend lip-sync.
+
+    Lấy từ **hành vi model thật**, không phải từ việc SDK có field tương ứng —
+    bài học D05-C §1: ``GenerateVideosConfig`` có ``fps`` nhưng Veo vẫn cố định
+    24 fps, gửi tham số đi chỉ tạo ảo giác điều khiển được.
+    """
+
+    backend_id: str
+    backend_version: str
+    #: FPS model xuất ra khi không bị ép. Duix 30, MuseTalk 25.
+    native_fps: int
+    supported_fps: frozenset[int]
+    max_width: int
+    max_height: int
+    audio_sample_rate_hz: int
+    audio_channels: int
+    #: Bộ mã hoá tiếng — thứ quyết định chất lượng khẩu hình theo ngôn ngữ.
+    audio_encoder: str
+    #: Ngôn ngữ đã kiểm chứng. ``{"zh"}`` khác hẳn ``{"multi"}`` về ý nghĩa.
+    languages_verified: frozenset[str]
+    accepts_image_source: bool
+    accepts_video_source: bool
+    #: Gate phải mở thì adapter thật mới chạy.
+    requires_gate: str
+    resources: ResourceEstimate
+    source_url: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.backend_id or not self.backend_version:
+            msg = "Capability phải khai backend_id và backend_version."
+            raise ValueError(msg)
+        if self.native_fps <= 0:
+            msg = "native_fps phải dương."
+            raise ValueError(msg)
+        if self.native_fps not in self.supported_fps:
+            msg = f"native_fps={self.native_fps} phải nằm trong supported_fps."
+            raise ValueError(msg)
+        if not self.audio_encoder:
+            msg = "Phải khai audio_encoder — nó quyết định chất lượng theo ngôn ngữ."
+            raise ValueError(msg)
+        if not self.languages_verified:
+            msg = "Phải khai languages_verified, kể cả khi chỉ có một ngôn ngữ."
+            raise ValueError(msg)
+        if not (self.accepts_image_source or self.accepts_video_source):
+            msg = "Backend phải nhận được ít nhất một loại nguồn."
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True)
+class AvatarProvenance:
+    """Dấu vết đủ để truy ngược một video về model và đầu vào đã sinh ra nó.
+
+    Không có khối này thì nhìn một file `avatar.mp4` bất kỳ sẽ không biết được
+    model nào, checkpoint nào, tham số gì đã tạo ra nó.
+    """
+
+    backend_id: str
+    backend_version: str
+    model: str
+    model_version: str
+    audio_encoder: str
+    #: FPS model THỰC SỰ xuất ra, có thể khác ``AvatarRequest.fps``.
+    source_fps: int
+    #: Vân tay đầu vào. Rỗng khi file không tồn tại lúc chạy (đường mock).
+    audio_sha256: str = ""
+    source_asset_sha256: str = ""
+    #: Băm checkpoint. Rỗng khi trọng số nằm trong Docker image.
+    checkpoint_sha256: str = ""
+    #: Digest image với backend chạy container.
+    image_digest: str = ""
+    #: Tham số inference thật, để tái lập.
+    params: dict[str, str] = field(default_factory=dict)
+    render_seconds: float | None = None
+    peak_vram_mib: int | None = None
+
+
+@dataclass(frozen=True)
 class AvatarResult:
     path: Path
     duration_sec: float
@@ -102,6 +229,8 @@ class AvatarResult:
     fps: int
     is_placeholder: bool = False
     actual_cost_usd: float | None = None
+    #: Bắt buộc với backend thật; mock cũng khai để hợp đồng đồng nhất.
+    provenance: AvatarProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -141,11 +270,21 @@ class TtsProvider(Protocol):
 
 @runtime_checkable
 class AvatarProvider(Protocol):
-    """Provider sinh video người nói từ WAV + tài sản avatar."""
+    """Provider sinh video người nói từ WAV + tài sản avatar.
+
+    Năm phương thức, mỗi cái trả lời một câu hỏi phải trả lời được **trước** khi
+    chạm GPU: tôi là ai (``info``), tôi làm được gì (``capability``), tôi tốn bao
+    nhiêu tiền (``quote``), tôi tốn bao nhiêu tài nguyên (``estimate_resources``),
+    và cuối cùng mới là chạy (``generate``).
+    """
 
     def info(self) -> ProviderInfo: ...
 
+    def capability(self) -> AvatarCapability: ...
+
     def quote(self, request: AvatarRequest) -> CostQuote: ...
+
+    def estimate_resources(self, request: AvatarRequest) -> ResourceEstimate: ...
 
     def generate(self, request: AvatarRequest, out_path: Path) -> AvatarResult: ...
 

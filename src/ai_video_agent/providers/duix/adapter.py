@@ -39,7 +39,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,12 +47,18 @@ from ai_video_agent import gate_is_open
 from ai_video_agent.domain.enums import ProviderKind, ProviderMode, RenderStage
 from ai_video_agent.errors import ConsentMissingError, GateNotReachedError, ProviderError
 from ai_video_agent.providers._placeholder import read_wav_duration
+from ai_video_agent.providers.avatar_capability import check_avatar_request
 from ai_video_agent.providers.base import (
+    AvatarCapability,
+    AvatarProvenance,
     AvatarRequest,
     AvatarResult,
     CostQuote,
     ProviderInfo,
+    ResourceEstimate,
+    fingerprint_file,
 )
+from ai_video_agent.providers.duix.capability import DUIX_CAPABILITY, DUIX_RESOURCES
 from ai_video_agent.providers.pricing import DUIX_LOCAL
 
 GATE = "D03"
@@ -279,18 +285,38 @@ class DuixAvatarProvider:
 
             time.sleep(self._poll_interval_sec)
 
+    def capability(self) -> AvatarCapability:
+        """Năng lực đo thật, kèm digest image đang ghim của lần dựng này."""
+        base = DUIX_CAPABILITY
+        if self._image_digest is None:
+            return base
+        return replace(base, backend_version=f"duix.avatar@{self._image_digest}")
+
+    def estimate_resources(self, request: AvatarRequest) -> ResourceEstimate:
+        """Duix chạy trong container với VRAM gần như không đổi theo độ dài clip.
+
+        Bake-off đo 7.004 MiB cho clip 7,6 s; VRAM do kích thước khung và model
+        quyết định, không do thời lượng. Vì vậy trả về đúng số đã đo thay vì
+        nhân theo ``duration_sec`` — một công thức bịa còn tệ hơn một số đo.
+        """
+        del request
+        return DUIX_RESOURCES
+
     def generate(self, request: AvatarRequest, out_path: Path) -> AvatarResult:
         """Sinh video người nói. Gửi ĐÚNG MỘT job, không tự thử lại."""
         self._assert_gate_open()
         self._assert_avatar_source(request)
         assert request.avatar_source is not None  # noqa: S101 - đã kiểm tra ở trên
+        check_avatar_request(self.capability(), request, source_is_image=False)
 
+        started = time.monotonic()
         job = self.submit(
             job_code=f"aiva-{request.shot_id}-{int(time.time())}",
             video_url=self.to_container_path(request.avatar_source),
             audio_url=self.to_container_path(request.audio_path),
         )
         self.wait(job)
+        elapsed = time.monotonic() - started
 
         produced = self._resolve_result(job)
         return AvatarResult(
@@ -301,6 +327,30 @@ class DuixAvatarProvider:
             fps=request.fps,
             is_placeholder=False,
             actual_cost_usd=0.0,
+            provenance=self._provenance(request, job, elapsed),
+        )
+
+    def _provenance(
+        self, request: AvatarRequest, job: DuixJob, render_seconds: float
+    ) -> AvatarProvenance:
+        """Dấu vết đủ để truy ngược video này về model và đầu vào đã sinh ra nó."""
+        cap = self.capability()
+        return AvatarProvenance(
+            backend_id=cap.backend_id,
+            backend_version=cap.backend_version,
+            model=self._model,
+            model_version=self._image_digest or "unpinned",
+            audio_encoder=cap.audio_encoder,
+            source_fps=request.fps,
+            audio_sha256=fingerprint_file(request.audio_path),
+            source_asset_sha256=fingerprint_file(request.avatar_source),
+            #: Trọng số nằm trong Docker image, không có file checkpoint rời.
+            checkpoint_sha256="",
+            image_digest=self._image_digest or "",
+            params={str(k): str(v) for k, v in job.payload.items() if k != "code"},
+            render_seconds=round(render_seconds, 3),
+            #: Duix chạy trong container; adapter không quan sát được VRAM đỉnh.
+            peak_vram_mib=None,
         )
 
     @staticmethod
