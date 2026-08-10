@@ -388,4 +388,135 @@ tài liệu này.
 
 ---
 
+## 11. D04-F — bằng chứng từ một lượt render thật tiếng Việt
+
+Batch D04-F chạy **đúng một lượt** render có kiểm soát để trả lời câu §6 đặt ra
+mà §5 chưa chạm tới: khẩu hình tiếng Việt của Duix đứng ở đâu khi đo trên câu
+thoại **cố ý dày âm môi**, không phải trên câu ngẫu nhiên.
+
+### 11.1 Điều kiện chạy
+
+| | |
+|---|---|
+| Project | `sample-khau-hinh` (runtime riêng, không đụng `demo-vn`) |
+| Storyboard | 1 shot, viết tay, `sha256 264e127695951c84…` |
+| Nguồn avatar | `avatar-goc.mp4` — 1080×1920 @30fps. **Video, không phải ảnh**: capability của Duix khai `accepts_image_source=False` |
+| Tham chiếu giọng | `voice-chinh` — bản thu THẬT của chủ sở hữu, `consent=granted` |
+| Câu thoại | 55 âm tiết, chọn dày /b/ /m/ /p/ /v/ và phụ âm cuối `-p` (`gấp`, `đẹp`) — nhóm mà tiếng Quan Thoại **không có** |
+
+### 11.2 Kết quả kỹ thuật
+
+| | |
+|---|---|
+| `run_id` | **`513f34ee83e6`** — `succeeded` |
+| Tổng thời gian | **86,1 s** |
+| Số job gửi Duix | **1** (`POST /easy/submit` đúng 1 lần, mã `aiva-shot-khau-hinh-1786337285`) |
+| Retry | **0** |
+| Chi phí | **0,00 USD**, `billable=false` cả 4 record |
+| OOM / lỗi CUDA | **0** |
+| Backend | `duix`, digest khoá `sha256:1970424d219cbb6aebc7566f069041f057ccad618a395139dce002e1fb25d5ed` |
+
+Thời gian từng bước (từ manifest):
+
+| Bước | Thời gian |
+|---|---|
+| `tts` (VieNeu, CPU/ONNX) | 27,7 s |
+| `avatar` (Duix, GPU) | **50,3 s** |
+| `subtitle` | < 0,1 s |
+| `compose` (FFmpeg) | 6,7 s |
+
+Đối chiếu ngưỡng vận hành §6.3:
+
+| Chỉ số | Ngưỡng §6.3 | Đo được | |
+|---|---|---|---|
+| Render / giây video | ≤ 30 s | **3,57 s** | ✅ |
+| A/V lệch | ≤ 0,02 s | **0,000 s** (WAV 14,080 s = avatar 14,080 s) | ✅ |
+| Peak VRAM | ≤ 10.000 MiB | **không lấy mẫu trong lúc chạy** — xem 11.5 | ⚠️ |
+
+### 11.3 Khẩu hình — 8 mốc âm môi
+
+Mốc thời gian từng từ là **ước lượng tuyến tính** từ 3 cue phụ đề (chia đều theo
+âm tiết), **không phải forced alignment**. Mỗi mốc quét 9 khung ≈ 0,3 s để giảm
+rủi ro trượt do ước sai. Một mục "trượt" vì thế có thể là sai số mốc, không chắc
+chắn là sai của model.
+
+| Từ | Âm cần thấy | Quan sát trên `avatar.mp4` thô | |
+|---|---|---|---|
+| `bà` | /b/ bật môi | hé suốt 9/9 khung, không khung nào khép | ❌ |
+| `miếng` | /m/ khép môi | 2 khung đầu khép rõ | ✅ |
+| `mặt` | /m/ khép môi | mở, thấy răng suốt, không khung nào khép | ❌ |
+| `pháp` | /f/ môi–răng + `-p` khép | môi gần khép phần lớn khung | ◐ |
+| `gấp` | `-p` khép cuối | hẹp dần nhưng không khép hẳn | ❌ |
+| `vị` | /v/ môi–răng | mở tròn, không thấy động tác môi–răng | ❌ |
+| `đẹp` | `-p` khép cuối | 8/9 khung khép và giữ | ✅ |
+| `vay vốn` | /v/ ×2 | mím gần suốt, ít phân hoá | ◐ |
+
+**Tổng: 2 đạt / 2 mơ hồ / 4 trượt.**
+
+**Kiểm chứng chéo — điểm quan trọng nhất của mục này.** Bảng tổng quan toàn clip
+(4 khung/giây) cho thấy Duix **có** sinh khung khép môi rải rác. Vậy 4 mục trượt
+**không phải** do "model không bao giờ khép môi", mà là **khép sai chỗ**. Đây
+đúng là hình dạng lỗi mà bake-off §8 đã dự đoán: tương quan đỉnh tại độ trễ 0
+(thời điểm đúng) nhưng r = 0,264 sát sàn ngẫu nhiên 0,218 (hình âm sai).
+
+Nguyên nhân gốc không đổi và đã được ghi từ bake-off §0/§14.2: Duix trích đặc
+trưng bằng WeNet huấn luyện trên AISHELL — kho ngữ liệu **tiếng Quan Thoại**.
+Log container của chính lượt chạy này xác nhận đường đi đó:
+
+```text
+format audio to 16k … -ac 1 -ar 16000
+get_aud_feat1 success, npy:…/audio_data.npy, cost: 4.432s
+```
+
+Tiếng Quan Thoại không có /v/ và không có phụ âm cuối `-p`. Bốn mục trượt rơi
+đúng vào hai nhóm đó.
+
+### 11.4 Kết luận
+
+> **Duix đạt technical viability local, KHÔNG đạt production lip-sync tiếng Việt.**
+
+Tách bạch hai điều, vì chúng dẫn tới hai quyết định khác nhau:
+
+* **Đạt về vận hành.** Một job, không retry, không OOM, 0 USD, 3,57 s/giây video,
+  A/V lệch 0,000 s, provenance truy vết đầy đủ, digest khoá đúng. Toàn bộ đường
+  ống D01→D04 chạy trọn end-to-end với provider thật.
+* **Không đạt về khẩu hình.** 4/8 mốc âm môi trượt, tập trung ở /v/ và `-p` —
+  hai nhóm âm mà bộ mã hoá không hề được huấn luyện. Đây là **trần của kiến
+  trúc**, không phải lỗi cấu hình: bake-off đã chứng minh cả 4 tham số API của
+  Duix đều vô hiệu với chất lượng khẩu hình.
+
+Hệ quả: giữ Duix làm backend production **duy nhất** cho tới khi có quyết định
+khác của PO, nhưng **không** coi khẩu hình tiếng Việt là đã nghiệm thu. Hợp đồng
+`AvatarProvider` (D04-A→D04-D) tồn tại chính vì kết luận này — đổi backend không
+phải sửa orchestrator.
+
+### 11.5 Điều batch này KHÔNG chứng minh được
+
+* **Peak VRAM thật của Duix.** Không lấy mẫu trong lúc job chạy. Chỉ có mốc
+  trước/sau: 7.226 MiB trống trước execute → 6.058 MiB sau render. Con số 7.004
+  MiB trong `DUIX_RESOURCES` vẫn là số của bake-off, lượt này **không xác nhận
+  lại**. Không có OOM là bằng chứng "vừa", không phải bằng chứng "bao nhiêu".
+* **Mốc thời gian từng từ.** Ước lượng, không forced alignment. Muốn kết luận
+  chắc hơn thì cần một công cụ căn chỉnh âm vị.
+* **So sánh với model khác.** Batch này không chạy MuseTalk hay LatentSync.
+
+### 11.6 Nơi lưu bằng chứng
+
+Toàn bộ nằm ngoài Git, dưới `F:\AI-VIDEO-AGENT-RUNTIME\projects\sample-khau-hinh\`:
+
+| Thứ | Đường dẫn tương đối | SHA-256 (lấy từ manifest, không tính lại) |
+|---|---|---|
+| Video hoàn chỉnh | `outputs\sample-khau-hinh-513f34ee83e6.mp4` | *(không ghi trong manifest)* |
+| Avatar thô (Duix) | `artifacts\shot-khau-hinh\e33ed107fbb38526\avatar.mp4` | `35ce43971b6899003f244b45e603749e7b186c90fa56bbb2ec7ed2df744fd143` |
+| WAV do TTS sinh | `artifacts\shot-khau-hinh\e33ed107fbb38526\audio.wav` | `0d072f5e45ececc4ce51b498b818af31428ea089ec1490764a4daf3b8f863a03` |
+| Nguồn avatar | `assets\avatar\avatar-goc.mp4` | `71cf0baa2f4506f95019c0ccffd702bfff6c29f1b7b18e96c08c73c7271180da` |
+| Manifest | `renders\513f34ee83e6\render-manifest.json` | — |
+
+Chấm khẩu hình nên soi **`avatar.mp4` thô**, không phải video đã ghép: bản ghép
+có phụ đề và nhãn AI đè lên.
+
+---
+
 D04A_STATUS = THIẾT KẾ XONG, CHỜ PO DUYỆT BƯỚC TIẾP
+
+D04F_STATUS = SAMPLE THẬT ĐÃ CHẠY — VIABILITY ĐẠT, LIP-SYNC TIẾNG VIỆT KHÔNG ĐẠT
