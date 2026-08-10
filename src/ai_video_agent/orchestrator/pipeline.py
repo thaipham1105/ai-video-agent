@@ -41,13 +41,19 @@ from ai_video_agent.domain.enums import (
     StageStatus,
 )
 from ai_video_agent.domain.project import Project
-from ai_video_agent.domain.render import RenderManifest, RenderRecord
+from ai_video_agent.domain.render import (
+    AvatarProvenanceRecord,
+    RenderManifest,
+    RenderRecord,
+    ResourceUsage,
+)
 from ai_video_agent.domain.storyboard import Shot, Storyboard
 from ai_video_agent.errors import (
     BrollQcFailedError,
     ConfigError,
     ConsentMissingError,
     HumanApprovalRequiredError,
+    ProviderError,
     ValidationError,
 )
 from ai_video_agent.orchestrator import costguard
@@ -55,12 +61,20 @@ from ai_video_agent.orchestrator.estimator import Estimate, estimate_storyboard
 from ai_video_agent.orchestrator.repository import ProjectRepository
 from ai_video_agent.providers._placeholder import read_wav_duration
 from ai_video_agent.providers.base import (
+    AvatarCapability,
     AvatarRequest,
+    AvatarResult,
     BrollRequest,
     BrollResult,
     ProviderInfo,
     ProviderSet,
     TtsRequest,
+    fingerprint_file,
+)
+from ai_video_agent.providers.resource_budget import (
+    ResourceBudget,
+    ResourcePreflight,
+    check_resources,
 )
 from ai_video_agent.qc.approval import assert_shot_approved, qc_report_path_for
 from ai_video_agent.qc.broll import run_qc
@@ -365,6 +379,10 @@ class Pipeline:
 
         tts_info = self._provider_set.tts.info()
         avatar_info = self._provider_set.avatar.info()
+        avatar_capability = self._provider_set.avatar.capability()
+        # Dò một lần cho cả run: gọi nvidia-smi mỗi shot vừa chậm vừa cho ra
+        # những con số nhấp nháy khiến báo cáo khó đọc.
+        budget = ResourceBudget.detect(self.config)
         results: list[_ShotArtifacts] = []
         cursor = 0.0
 
@@ -456,19 +474,21 @@ class Pipeline:
                     )
                 )
             else:
-                started = self.now()
-                avatar_result = self._provider_set.avatar.generate(
-                    AvatarRequest(
-                        shot_id=shot.id,
-                        audio_path=audio_path,
-                        avatar_source=avatar_source,
-                        width=width,
-                        height=height,
-                        fps=project.fps,
-                        duration_sec=duration,
-                    ),
-                    video_path,
+                avatar_request = AvatarRequest(
+                    shot_id=shot.id,
+                    audio_path=audio_path,
+                    avatar_source=avatar_source,
+                    width=width,
+                    height=height,
+                    fps=project.fps,
+                    duration_sec=duration,
                 )
+                # Hàng rào tài nguyên đứng TRƯỚC generate(): thiếu VRAM thì phải
+                # biết ngay, không phải sau khi container đã nạp xong model.
+                preflight = self._avatar_preflight(manifest, avatar_info, avatar_request, budget)
+
+                started = self.now()
+                avatar_result = self._provider_set.avatar.generate(avatar_request, video_path)
                 # Provider thật (Duix) ghi kết quả vào thư mục của riêng nó, không
                 # theo đường dẫn ta đưa. Đưa về cache của shot để bước ghép và lần
                 # chạy sau đều tìm thấy ở một chỗ duy nhất.
@@ -487,6 +507,9 @@ class Pipeline:
                         outputs=[str(video_path)],
                         is_placeholder=avatar_result.is_placeholder,
                         actual_cost_usd=avatar_result.actual_cost_usd,
+                        avatar_provenance=self._avatar_provenance_record(
+                            avatar_info, avatar_capability, avatar_result, video_path, preflight
+                        ),
                         message=(
                             f"provider ghi tại {avatar_result.path}"
                             if Path(avatar_result.path).resolve() != video_path.resolve()
@@ -1014,6 +1037,86 @@ class Pipeline:
             msg = f"Không có shot: {', '.join(unknown)}. Shot hợp lệ: {', '.join(sorted(known))}"
             raise ValidationError(msg)
 
+    def _avatar_preflight(
+        self,
+        manifest: RenderManifest,
+        info: ProviderInfo,
+        request: AvatarRequest,
+        budget: ResourceBudget,
+    ) -> ResourcePreflight:
+        """Chặn nếu thiếu tài nguyên; nói rõ nếu không đủ dữ liệu để kết luận.
+
+        Không đủ dữ liệu thì **không chặn**: máy không có ``nvidia-smi`` vẫn phải
+        chạy được đường mock. Nhưng cũng không im lặng — im lặng ở đây đọc thành
+        "đã kiểm và đủ", đúng kiểu nhầm mà preflight sinh ra để tránh.
+        """
+        needed = self._provider_set.avatar.estimate_resources(request)
+        preflight = check_resources(info.name, needed, budget)
+        preflight.raise_if_insufficient()
+        note = preflight.warning()
+        if note not in manifest.warnings:
+            manifest.warnings.append(note)
+        return preflight
+
+    @staticmethod
+    def _avatar_provenance_record(
+        info: ProviderInfo,
+        capability: AvatarCapability,
+        result: AvatarResult,
+        output_path: Path,
+        preflight: ResourcePreflight,
+    ) -> AvatarProvenanceRecord:
+        """Đổi provenance của provider sang model lưu trữ của ``domain/``.
+
+        Ghi ``None`` khi provider không khai là che lỗi: nhìn manifest sẽ không
+        phân biệt được "backend không hỗ trợ truy vết" với "có hỗ trợ nhưng ai đó
+        quên nối dây". Nên thiếu là hỏng ngay, kèm tên backend để biết đi sửa ở đâu.
+        """
+        provenance = result.provenance
+        if provenance is None:
+            msg = (
+                f"Provider avatar {info.name!r} ({info.model}@{info.version}) trả về "
+                "kết quả KHÔNG có provenance. Hợp đồng AvatarProvider bắt buộc "
+                "trường này để truy ngược video về model và đầu vào đã sinh ra nó. "
+                "Sửa adapter để trả AvatarProvenance, đừng ghi manifest rỗng."
+            )
+            raise ProviderError(msg)
+
+        needed = preflight.needed
+        return AvatarProvenanceRecord(
+            backend_id=provenance.backend_id,
+            backend_version=provenance.backend_version,
+            model=provenance.model,
+            model_version=provenance.model_version,
+            audio_encoder=provenance.audio_encoder,
+            #: Ảnh chụp năng lực tại LÚC CHẠY. Backend nâng cấp sau này không được
+            #: làm đổi nghĩa của một manifest đã ghi.
+            languages_verified=sorted(capability.languages_verified),
+            native_fps=capability.native_fps,
+            source_fps=provenance.source_fps,
+            audio_sha256=provenance.audio_sha256,
+            source_asset_sha256=provenance.source_asset_sha256,
+            #: Băm file ĐÃ NẰM TRONG CACHE, không phải file provider tự ghi ra —
+            #: đây mới là file bước ghép sẽ đọc.
+            output_sha256=fingerprint_file(output_path),
+            checkpoint_sha256=provenance.checkpoint_sha256,
+            image_digest=provenance.image_digest,
+            output_width=result.width,
+            output_height=result.height,
+            output_fps=result.fps,
+            output_duration_sec=result.duration_sec,
+            params=dict(provenance.params),
+            resources=ResourceUsage(
+                est_vram_mib=needed.vram_mib,
+                est_ram_mib=needed.ram_mib,
+                est_storage_mib=needed.storage_mib,
+                estimate_measured=needed.measured,
+                estimate_measured_on=needed.measured_on,
+                peak_vram_mib=provenance.peak_vram_mib,
+                render_seconds=provenance.render_seconds,
+            ),
+        )
+
     def _record(
         self,
         stage: RenderStage,
@@ -1027,6 +1130,7 @@ class Pipeline:
         outputs: list[str] | None = None,
         is_placeholder: bool = False,
         actual_cost_usd: float | None = None,
+        avatar_provenance: AvatarProvenanceRecord | None = None,
         message: str = "",
     ) -> RenderRecord:
         return RenderRecord(
@@ -1043,6 +1147,7 @@ class Pipeline:
             outputs=outputs or [],
             is_placeholder=is_placeholder,
             actual_cost_usd=actual_cost_usd,
+            avatar_provenance=avatar_provenance,
             message=message,
         )
 

@@ -252,6 +252,39 @@ def test_b_resume_ghep_duoc_ma_khong_goi_lai_provider(
     assert project.state is ProjectState.DONE
 
 
+@needs_ffmpeg
+def test_b_resume_giu_nguyen_provenance_avatar(
+    repo: ProjectRepository, config: Config, clock: FixedClock,
+    project: Project, storyboard: Storyboard, granted_assets: AssetManifest,
+    real_clip: Path,
+) -> None:
+    """Resume không gọi lại avatar, nên provenance phải đi theo từ run gốc.
+
+    Cùng loại lỗi đã bắt được với ``actual_cost_usd``: dựng manifest mới mà
+    không mang theo dữ liệu của run gốc thì dấu vết biến mất lặng lẽ.
+    """
+    provider = _CountingBrollProvider(real_clip)
+    pipeline = _pipeline(repo, config, clock, provider, _CountingComposer())
+    _enable_broll(storyboard)
+    _approve_project(project, storyboard)
+    repo.save_project(project)
+
+    with pytest.raises(HumanApprovalRequiredError):
+        _initial_render(pipeline, project, storyboard, granted_assets)
+
+    goc = repo.load_render_manifest(project.id, RUN_ID)
+    truoc = [
+        r.avatar_provenance for r in goc.records if r.stage is RenderStage.AVATAR
+    ]
+    assert truoc and all(p is not None for p in truoc)
+
+    _approve_all_clips(provider)
+    manifest = pipeline.resume(project, storyboard, granted_assets, RUN_ID)
+
+    sau = [r.avatar_provenance for r in manifest.records if r.stage is RenderStage.AVATAR]
+    assert sau == truoc, "resume làm mất provenance của run gốc"
+
+
 # =========================================================================
 # c) Clip đổi một byte sau khi duyệt: resume chặn, composer = 0
 # =========================================================================

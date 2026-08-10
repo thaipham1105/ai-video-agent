@@ -83,7 +83,87 @@
           "type": "boolean",
           "description": "Artifact bắt buộc người duyệt trước composer. Tính chất của run, không phải của cấu hình hiện tại."
         },
+        "avatar_provenance": {
+          "description": "Chỉ có ở bước 'avatar'. Đủ để truy ngược một avatar.mp4 về model, checkpoint và đầu vào đã sinh ra nó.",
+          "anyOf": [{ "$ref": "#/$defs/avatar_provenance" }, { "type": "null" }]
+        },
         "message": { "type": "string" }
+      }
+    },
+    "resource_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["est_vram_mib", "est_ram_mib", "est_storage_mib"],
+      "properties": {
+        "est_vram_mib": { "type": "integer", "minimum": 0 },
+        "est_ram_mib": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "description": "RAM = 0 là quên khai, không phải sự thật."
+        },
+        "est_storage_mib": { "type": "integer", "minimum": 0 },
+        "estimate_measured": {
+          "type": "boolean",
+          "description": "true = đo thật trên máy này; false = chép từ tài liệu upstream."
+        },
+        "estimate_measured_on": { "type": "string" },
+        "peak_vram_mib": {
+          "description": "Số đo THẬT của lần chạy. null = không quan sát được, KHÔNG phải 0.",
+          "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+        },
+        "render_seconds": {
+          "anyOf": [{ "type": "number", "minimum": 0 }, { "type": "null" }]
+        }
+      }
+    },
+    "avatar_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend_id",
+        "backend_version",
+        "model",
+        "audio_encoder",
+        "native_fps",
+        "source_fps",
+        "output_width",
+        "output_height",
+        "output_fps",
+        "output_duration_sec"
+      ],
+      "properties": {
+        "backend_id": { "type": "string", "minLength": 1 },
+        "backend_version": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "model_version": { "type": "string" },
+        "audio_encoder": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Bộ mã hoá tiếng — thứ quyết định chất lượng khẩu hình theo ngôn ngữ."
+        },
+        "languages_verified": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ngôn ngữ đã kiểm chứng. {'zh'} khác hẳn {'multi'} về ý nghĩa."
+        },
+        "native_fps": { "type": "integer", "exclusiveMinimum": 0 },
+        "source_fps": { "type": "integer", "exclusiveMinimum": 0 },
+        "audio_sha256": { "type": "string" },
+        "source_asset_sha256": { "type": "string" },
+        "output_sha256": { "type": "string" },
+        "checkpoint_sha256": { "type": "string" },
+        "image_digest": { "type": "string" },
+        "output_width": { "type": "integer", "exclusiveMinimum": 0 },
+        "output_height": { "type": "integer", "exclusiveMinimum": 0 },
+        "output_fps": { "type": "integer", "exclusiveMinimum": 0 },
+        "output_duration_sec": { "type": "number", "minimum": 0 },
+        "params": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "resources": {
+          "anyOf": [{ "$ref": "#/$defs/resource_usage" }, { "type": "null" }]
+        }
       }
     }
   }

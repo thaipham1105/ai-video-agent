@@ -46,6 +46,23 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_int_or_none(name: str) -> int | None:
+    """Số nguyên dương, hoặc ``None`` khi không khai / khai sai.
+
+    Cố ý không có giá trị mặc định: đây là ngưỡng tài nguyên, mà một mặc định
+    bịa ra sẽ chặn nhầm hoặc để lọt. Giá trị rác cũng về ``None`` — thà không
+    biết còn hơn tin một con số vô nghĩa.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -79,6 +96,15 @@ class Config:
         """Thư mục dữ liệu Duix trên host — nơi nó ghi kết quả."""
         return self.runtime_dir / "duix_avatar_data" / "face2face"
 
+    #: Ngưỡng tài nguyên do người vận hành khai, dùng cho preflight avatar.
+    #: ``None`` = **không khai**, khác hẳn 0. Preflight sẽ dò máy (chỉ đọc) rồi
+    #: báo "chưa xác minh được" nếu vẫn không biết — không bao giờ giả định 0
+    #: hay giả định vô hạn. Khai số thấp hơn thực tế là cách chừa chỗ cho việc
+    #: khác đang dùng chung GPU.
+    vram_budget_mib: int | None = None
+    ram_budget_mib: int | None = None
+    storage_budget_mib: int | None = None
+
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
 
@@ -109,6 +135,9 @@ class Config:
             duix_base_url=_env_str("AIVA_DUIX_BASE_URL", "http://127.0.0.1:8383"),
             duix_timeout_sec=_env_int("AIVA_DUIX_TIMEOUT_SEC", 900),
             duix_inputs_mount=_env_str("AIVA_DUIX_INPUTS_MOUNT", "/inputs"),
+            vram_budget_mib=_env_int_or_none("AIVA_VRAM_BUDGET_MIB"),
+            ram_budget_mib=_env_int_or_none("AIVA_RAM_BUDGET_MIB"),
+            storage_budget_mib=_env_int_or_none("AIVA_STORAGE_BUDGET_MIB"),
             ffmpeg_bin=_env_str("AIVA_FFMPEG_BIN", "ffmpeg"),
             ffprobe_bin=_env_str("AIVA_FFPROBE_BIN", "ffprobe"),
             video_api_provider=_env_str("AIVA_VIDEO_API_PROVIDER", "none"),

@@ -26,6 +26,7 @@ from ai_video_agent.domain.storyboard import Storyboard
 from ai_video_agent.orchestrator.pipeline import Pipeline
 from ai_video_agent.orchestrator.planner import RuleBasedPlanner
 from ai_video_agent.orchestrator.repository import ProjectRepository
+from ai_video_agent.providers import resource_budget
 from ai_video_agent.providers.registry import build_provider_set
 
 FIXED_MOMENT = datetime(2026, 8, 4, 9, 30, tzinfo=UTC)
@@ -52,6 +53,13 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # gọi ra ngoài; đây là cách biến quy tắc đó thành thứ máy tự thực thi.
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+
+    # Cùng lý do, cho GPU: preflight tài nguyên gọi `nvidia-smi` trên đường thật.
+    # Để nguyên thì kết quả test phụ thuộc vào card đang cắm và VRAM đang rảnh
+    # lúc chạy — hôm nay xanh, mai đỏ. Mặc định trả `None` = "chưa xác minh
+    # được", đúng trạng thái của một máy không có GPU. Test nào cần dò thật thì
+    # tự tiêm probe của mình.
+    monkeypatch.setattr(resource_budget, "probe_free_vram_mib", lambda: None)
 
 
 @pytest.fixture
