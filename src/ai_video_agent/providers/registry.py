@@ -18,6 +18,8 @@ from ai_video_agent.providers.base import (
     TtsProvider,
 )
 from ai_video_agent.providers.duix import DuixAvatarProvider, MockDuixAvatarProvider
+from ai_video_agent.providers.musetalk import MockMuseTalkProvider, MuseTalkAvatarProvider
+from ai_video_agent.providers.musetalk.capability import INSTALL_SUBPATH
 from ai_video_agent.providers.pricing import VIDEO_API_GENERIC, VIMAX_ORCHESTRATED
 from ai_video_agent.providers.video_api import VideoApiBrollProvider
 from ai_video_agent.providers.video_api.adapter import CallPolicy
@@ -25,7 +27,11 @@ from ai_video_agent.providers.vieneu import MockVieNeuTtsProvider, VieNeuTtsProv
 from ai_video_agent.providers.vimax import MockBrollProvider, ViMaxBrollProvider
 
 KNOWN_TTS = frozenset({"vieneu"})
-KNOWN_AVATAR = frozenset({"duix"})
+#: ``musetalk`` có mặt để bake-off D04-G dựng và kiểm được đường code. Nó **không**
+#: đổi mặc định của bất kỳ project nào: ``ProviderSelection.avatar`` vẫn là
+#: ``"duix"``, và adapter thật của musetalk bị gate ``D04G`` chặn — mà ``D04G``
+#: không nằm trong ``GATES`` nên ``gate_is_open()`` luôn trả False.
+KNOWN_AVATAR = frozenset({"duix", "musetalk"})
 KNOWN_BROLL = frozenset({"none", "vimax", "video_api"})
 
 
@@ -45,6 +51,20 @@ def _build_avatar(name: str, mode: ProviderMode, config: Config) -> AvatarProvid
     if name not in KNOWN_AVATAR:
         msg = f"Provider avatar không hợp lệ: {name!r}. Hợp lệ: {sorted(KNOWN_AVATAR)}"
         raise ConfigError(msg)
+
+    if name == "musetalk":
+        if mode is ProviderMode.MOCK:
+            return MockMuseTalkProvider()
+        # Đường cài đặt suy ra từ `runtime_dir`, không ghi cứng vào source. Adapter
+        # KHÔNG tự cài và KHÔNG tự tải — thiếu thì nó hỏng với thông điệp rõ.
+        return MuseTalkAvatarProvider(
+            install_dir=config.runtime_dir / INSTALL_SUBPATH,
+            hf_home=config.runtime_dir / "model-bakeoff" / "weights" / "hf-cache",
+            #: Đo thời lượng video ĐẦU RA trên host. Dùng đúng binary mà phần còn
+            #: lại của dự án dùng, thay vì giả định `ffprobe` có trên PATH.
+            ffprobe_bin=config.ffprobe_bin,
+        )
+
     if mode is ProviderMode.MOCK:
         return MockDuixAvatarProvider()
     # Duix nhận đường dẫn local THEO GÓC NHÌN CONTAINER, và ghi kết quả vào thư

@@ -28,19 +28,25 @@ from ai_video_agent.domain.enums import ProviderKind, ProviderMode, RenderStage
 from ai_video_agent.errors import GateNotReachedError
 from ai_video_agent.providers.base import AvatarProvider, AvatarRequest
 from ai_video_agent.providers.duix import DuixAvatarProvider, MockDuixAvatarProvider
+from ai_video_agent.providers.musetalk import MockMuseTalkProvider, MuseTalkAvatarProvider
 
 #: Mọi backend lip-sync phải có mặt ở đây. Thêm backend = thêm một dòng.
 #: ``(nhãn, hàm dựng, có phải adapter thật không)``
 AVATAR_BACKENDS: list[tuple[str, object, bool]] = [
     ("duix-mock", MockDuixAvatarProvider, False),
     ("duix-real", DuixAvatarProvider, True),
+    ("musetalk-mock", MockMuseTalkProvider, False),
+    ("musetalk-real", MuseTalkAvatarProvider, True),
 ]
 
 MOCK_BACKENDS = [(n, f) for n, f, real in AVATAR_BACKENDS if not real]
 REAL_BACKENDS = [(n, f) for n, f, real in AVATAR_BACKENDS if real]
 
 #: Module của adapter thật — dùng cho kiểm import cấp module.
-REAL_ADAPTER_SOURCES = ["src/ai_video_agent/providers/duix/adapter.py"]
+REAL_ADAPTER_SOURCES = [
+    "src/ai_video_agent/providers/duix/adapter.py",
+    "src/ai_video_agent/providers/musetalk/adapter.py",
+]
 
 #: SDK nặng không được import ở cấp module (AGENTS.md).
 HEAVY_MODULES = {"torch", "torchvision", "torchaudio", "vieneu", "transformers",
