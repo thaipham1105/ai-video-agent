@@ -132,6 +132,24 @@ def test_render_mac_dinh_la_dry_run(runtime_dir: Path) -> None:
     assert not list((runtime_dir / "projects" / PROJECT_ID / "artifacts").rglob("*"))
 
 
+def test_render_dry_run_in_canh_bao_ngon_ngu_va_preflight() -> None:
+    """D04-D: hai câu này phải đọc được ngay ở dry-run, không cần --execute.
+
+    Test ở tầng CLI chứ không phải tầng manifest: manifest có mà CLI nuốt mất
+    thì với người dùng là không có.
+    """
+    _plan()
+    _approve()
+
+    result = runner.invoke(app, ["render", PROJECT_ID])
+
+    assert result.exit_code == 0, result.output
+    assert "DRY-RUN" in result.output
+    assert "NGÔN NGỮ" in result.output, "Duix chưa kiểm chứng 'vi' — phải nói ra"
+    assert "wenet-aishell" in result.output, "phải chỉ ra nguyên nhân gốc"
+    assert "Preflight tài nguyên" in result.output
+
+
 def test_render_that_bi_chan_khi_chua_duyet() -> None:
     _plan()
 

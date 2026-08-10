@@ -25,7 +25,11 @@ from ai_video_agent.domain.project import Approval, BudgetPolicy, Project, Provi
 from ai_video_agent.errors import AivaError, ProjectNotFoundError
 from ai_video_agent.jsonschemas import SchemaName, iter_errors
 from ai_video_agent.orchestrator.estimator import Estimate
-from ai_video_agent.orchestrator.pipeline import Pipeline, RenderOptions
+from ai_video_agent.orchestrator.pipeline import (
+    LANGUAGE_WARNING_PREFIX,
+    Pipeline,
+    RenderOptions,
+)
 from ai_video_agent.orchestrator.planner import RuleBasedPlanner
 from ai_video_agent.orchestrator.repository import ProjectRepository
 from ai_video_agent.orchestrator.textutil import slugify
@@ -387,7 +391,12 @@ def render(
             "[yellow]![/yellow] Output là file GIẢ do mock sinh ra, không phải video thật."
         )
     for warning in manifest.warnings:
-        console.print(f"[dim]• {warning}[/dim]")
+        # Cảnh báo ngôn ngữ nói về trần chất lượng khẩu hình — in [dim] cùng các
+        # ghi chú thường lệ thì đúng là có hiện, nhưng không ai đọc.
+        if warning.startswith(LANGUAGE_WARNING_PREFIX):
+            console.print(f"[yellow]![/yellow] {warning}")
+        else:
+            console.print(f"[dim]• {warning}[/dim]")
 
 
 # --------------------------------------------------------- render-resume -----
@@ -448,7 +457,12 @@ def render_resume(
     if manifest.outputs:
         console.print(f"Output: {manifest.outputs[0]}")
     for warning in manifest.warnings:
-        console.print(f"[dim]• {warning}[/dim]")
+        # Cảnh báo ngôn ngữ nói về trần chất lượng khẩu hình — in [dim] cùng các
+        # ghi chú thường lệ thì đúng là có hiện, nhưng không ai đọc.
+        if warning.startswith(LANGUAGE_WARNING_PREFIX):
+            console.print(f"[yellow]![/yellow] {warning}")
+        else:
+            console.print(f"[dim]• {warning}[/dim]")
 
 
 # ---------------------------------------------------------------- status -----

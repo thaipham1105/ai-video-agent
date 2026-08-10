@@ -597,14 +597,19 @@ def test_canh_bao_preflight_khong_lap_lai_moi_shot(
     assert len(notes) == 1, f"{len(storyboard.shots)} shot nhưng chỉ cần nói một lần"
 
 
-def test_dung_lai_video_cu_thi_khong_hoi_tai_nguyen(
+def test_hoi_tai_nguyen_dung_mot_lan_cho_ca_run(
     pipeline: Pipeline,
     repo: ProjectRepository,
     project: Project,
     storyboard: Storyboard,
     granted_assets: AssetManifest,
 ) -> None:
-    """Không chạm GPU thì không có gì để chặn — hỏi ở đây là hỏi vô cớ."""
+    """Preflight là câu hỏi của *lần chạy*, không phải của từng shot.
+
+    D04-D chuyển preflight lên cấp run để dry-run và execute dùng chung đúng một
+    đường. Hệ quả: số lần hỏi không còn phụ thuộc vào bao nhiêu shot phải render
+    lại hay bao nhiêu shot lấy từ cache.
+    """
     _render(pipeline, repo, project, storyboard, granted_assets)
     assert len(storyboard.shots) > 1, "test này cần nhiều hơn một shot mới có nghĩa"
 
@@ -616,32 +621,13 @@ def test_dung_lai_video_cu_thi_khong_hoi_tai_nguyen(
             return super().estimate_resources(request)
 
     pipeline._provider_set.avatar = Dem()  # type: ignore[assignment]
-    muc_tieu = storyboard.shots[0].id
 
     manifest = pipeline.render(
         project,
         storyboard,
         granted_assets,
-        RenderOptions(dry_run=False, only_shots=(muc_tieu,)),
+        RenderOptions(dry_run=False, only_shots=(storyboard.shots[0].id,)),
     )
 
     assert manifest.status == "succeeded"
-    assert da_hoi == [muc_tieu], "chỉ shot phải render lại mới cần preflight"
-
-
-def test_dry_run_khong_hoi_tai_nguyen_va_khong_do_gpu(
-    pipeline: Pipeline,
-    project: Project,
-    storyboard: Storyboard,
-    empty_assets: AssetManifest,
-) -> None:
-    """Dry-run không chạm provider — preflight thuộc về đường chạy thật."""
-
-    class NoTung(MockDuixAvatarProvider):
-        def estimate_resources(self, request: AvatarRequest) -> ResourceEstimate:
-            raise AssertionError("Dry-run mà đã hỏi tài nguyên.")
-
-    pipeline._provider_set.avatar = NoTung()  # type: ignore[assignment]
-
-    manifest = pipeline.render(project, storyboard, empty_assets)
-    assert manifest.dry_run is True
+    assert len(da_hoi) == 1, f"hỏi {len(da_hoi)} lần cho một run: {da_hoi}"

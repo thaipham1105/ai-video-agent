@@ -60,6 +60,10 @@ from ai_video_agent.orchestrator import costguard
 from ai_video_agent.orchestrator.estimator import Estimate, estimate_storyboard
 from ai_video_agent.orchestrator.repository import ProjectRepository
 from ai_video_agent.providers._placeholder import read_wav_duration
+from ai_video_agent.providers.avatar_capability import (
+    describe_language_fit,
+    language_is_verified,
+)
 from ai_video_agent.providers.base import (
     AvatarCapability,
     AvatarRequest,
@@ -78,6 +82,11 @@ from ai_video_agent.providers.resource_budget import (
 )
 from ai_video_agent.qc.approval import assert_shot_approved, qc_report_path_for
 from ai_video_agent.qc.broll import run_qc
+
+#: Tiền tố của cảnh báo ngôn ngữ trong ``manifest.warnings``. CLI dùng nó để in
+#: nổi bật thay vì chìm lẫn trong các ghi chú thường lệ. Định nghĩa một chỗ để
+#: hai bên không tự gõ lại chuỗi rồi lệch nhau.
+LANGUAGE_WARNING_PREFIX = "CẢNH BÁO NGÔN NGỮ"
 
 #: Khoảng cách dọc giữa hai lớp chữ chính xác xếp chồng.
 _TEXT_STACK_STEP = 70
@@ -184,12 +193,16 @@ class Pipeline:
             warnings=[*estimate.warnings, *decision.warnings],
         )
 
+        # Trước cả dry-run: đây là những câu trả lời được mà không cần chạy gì,
+        # nên không có lý do gì bắt người dùng thêm --execute mới biết.
+        preflight = self._avatar_prechecks(manifest, project, storyboard)
+
         if opts.dry_run:
             self._fill_dry_run(manifest, project, storyboard, estimate)
             self.repository.save_render_manifest(manifest)
             return manifest
 
-        return self._execute(manifest, project, storyboard, assets, opts)
+        return self._execute(manifest, project, storyboard, assets, opts, preflight)
 
     # ----- dry-run -------------------------------------------------------------
 
@@ -279,6 +292,7 @@ class Pipeline:
         storyboard: Storyboard,
         assets: AssetManifest,
         opts: RenderOptions,
+        preflight: ResourcePreflight,
     ) -> RenderManifest:
         paths = self.repository.paths(project.id)
         run_dir = paths.run_dir(manifest.run_id)
@@ -290,7 +304,7 @@ class Pipeline:
         self.repository.save_project(project)
 
         try:
-            artifacts = self._render_shots(manifest, project, storyboard, assets, opts)
+            artifacts = self._render_shots(manifest, project, storyboard, assets, opts, preflight)
             subtitles = self._write_subtitles(manifest, run_dir, artifacts)
             output = self._compose(manifest, project, assets, artifacts, subtitles)
         except (HumanApprovalRequiredError, BrollQcFailedError) as exc:
@@ -357,6 +371,7 @@ class Pipeline:
         storyboard: Storyboard,
         assets: AssetManifest,
         opts: RenderOptions,
+        preflight: ResourcePreflight,
     ) -> list[_ShotArtifacts]:
         width, height = project.aspect_ratio.size
         mock = opts.provider_mode is ProviderMode.MOCK
@@ -380,9 +395,6 @@ class Pipeline:
         tts_info = self._provider_set.tts.info()
         avatar_info = self._provider_set.avatar.info()
         avatar_capability = self._provider_set.avatar.capability()
-        # Dò một lần cho cả run: gọi nvidia-smi mỗi shot vừa chậm vừa cho ra
-        # những con số nhấp nháy khiến báo cáo khó đọc.
-        budget = ResourceBudget.detect(self.config)
         results: list[_ShotArtifacts] = []
         cursor = 0.0
 
@@ -483,10 +495,6 @@ class Pipeline:
                     fps=project.fps,
                     duration_sec=duration,
                 )
-                # Hàng rào tài nguyên đứng TRƯỚC generate(): thiếu VRAM thì phải
-                # biết ngay, không phải sau khi container đã nạp xong model.
-                preflight = self._avatar_preflight(manifest, avatar_info, avatar_request, budget)
-
                 started = self.now()
                 avatar_result = self._provider_set.avatar.generate(avatar_request, video_path)
                 # Provider thật (Duix) ghi kết quả vào thư mục của riêng nó, không
@@ -1037,26 +1045,67 @@ class Pipeline:
             msg = f"Không có shot: {', '.join(unknown)}. Shot hợp lệ: {', '.join(sorted(known))}"
             raise ValidationError(msg)
 
-    def _avatar_preflight(
-        self,
-        manifest: RenderManifest,
-        info: ProviderInfo,
-        request: AvatarRequest,
-        budget: ResourceBudget,
+    def _avatar_prechecks(
+        self, manifest: RenderManifest, project: Project, storyboard: Storyboard
     ) -> ResourcePreflight:
-        """Chặn nếu thiếu tài nguyên; nói rõ nếu không đủ dữ liệu để kết luận.
+        """Hai kiểm tra chạy TRƯỚC mọi thứ, giống hệt nhau ở dry-run và execute.
 
-        Không đủ dữ liệu thì **không chặn**: máy không có ``nvidia-smi`` vẫn phải
-        chạy được đường mock. Nhưng cũng không im lặng — im lặng ở đây đọc thành
-        "đã kiểm và đủ", đúng kiểu nhầm mà preflight sinh ra để tránh.
+        Đặt ở đây thay vì trong vòng lặp shot vì cả hai câu hỏi đều thuộc về *lần
+        chạy*, không thuộc về từng shot: backend nào, ngôn ngữ nào, máy có bao
+        nhiêu tài nguyên. Nhờ vậy ``aiva render`` không có ``--execute`` trả lời
+        được đúng những câu mà bản có ``--execute`` trả lời — mà không chạm
+        provider, GPU hay HTTP.
+
+        Chia đôi rất rõ:
+
+        * **Ngôn ngữ** chỉ cảnh báo. Chạy Duix cho tiếng Việt là lựa chọn có ý
+          thức (PO đã chọn ở bake-off D04), không phải lỗi cấu hình.
+        * **Tài nguyên** thì chặn — nhưng chỉ khi *biết chắc* là thiếu.
         """
-        needed = self._provider_set.avatar.estimate_resources(request)
-        preflight = check_resources(info.name, needed, budget)
+        avatar = self._provider_set.avatar
+        info = avatar.info()
+        capability = avatar.capability()
+
+        if not language_is_verified(capability, storyboard.language):
+            manifest.warnings.append(
+                f"{LANGUAGE_WARNING_PREFIX} — {info.name} ({info.model}@{info.version}): "
+                f"{describe_language_fit(capability, storyboard.language)} "
+                f"Đã kiểm chứng: {sorted(capability.languages_verified)}. "
+                "Vẫn render bình thường; đây là trần chất lượng đã biết, không phải lỗi."
+            )
+
+        preflight = check_resources(
+            info.name,
+            avatar.estimate_resources(self._worst_case_request(project, storyboard)),
+            ResourceBudget.detect(self.config),
+        )
         preflight.raise_if_insufficient()
-        note = preflight.warning()
-        if note not in manifest.warnings:
-            manifest.warnings.append(note)
+        manifest.warnings.append(preflight.warning())
         return preflight
+
+    @staticmethod
+    def _worst_case_request(project: Project, storyboard: Storyboard) -> AvatarRequest:
+        """Shot dài nhất — preflight phải trả lời cho trường hợp nặng nhất.
+
+        Duix tốn VRAM theo kích thước khung chứ không theo thời lượng, nên với
+        backend hiện tại chọn shot nào cũng ra một kết quả. Nhưng một backend
+        sau này có thể giữ toàn bộ khung trong VRAM; lúc đó lấy shot đầu tiên sẽ
+        cho ra con số đẹp rồi OOM ở shot dài nhất.
+        """
+        longest = max(storyboard.shots, key=lambda shot: shot.duration_sec)
+        width, height = project.aspect_ratio.size
+        return AvatarRequest(
+            shot_id=longest.id,
+            # Dry-run chưa có WAV nào. `estimate_resources()` không được đọc file
+            # — hợp đồng D04-A đã có test canh đúng điều đó, nên đường dẫn này
+            # không tồn tại là chuyện bình thường, không phải thiếu sót.
+            audio_path=Path("chua-sinh.wav"),
+            avatar_source=None,
+            width=width,
+            height=height,
+            fps=project.fps,
+            duration_sec=longest.duration_sec,
+        )
 
     @staticmethod
     def _avatar_provenance_record(

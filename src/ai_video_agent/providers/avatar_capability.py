@@ -69,6 +69,17 @@ def check_avatar_request(
             raise CapabilityError(msg)
 
 
+def language_is_verified(capability: AvatarCapability, language: str) -> bool:
+    """Ngôn ngữ này đã được kiểm chứng trên backend chưa.
+
+    Tách khỏi :func:`describe_language_fit` vì nơi gọi cần **quyết định** (có
+    cảnh báo hay không) chứ không phải một câu văn để dò chuỗi. Dò chuỗi tiếng
+    Việt trong logic điều kiện là thứ hỏng ngay lần đầu ai đó sửa lời văn.
+    """
+    verified = capability.languages_verified
+    return "multi" in verified or language in verified
+
+
 def describe_language_fit(capability: AvatarCapability, language: str) -> str:
     """Câu mô tả ngắn về mức phù hợp ngôn ngữ, để ghi vào cảnh báo/manifest.
 
@@ -76,11 +87,10 @@ def describe_language_fit(capability: AvatarCapability, language: str) -> str:
     thức của người dùng**, không phải lỗi cấu hình. Nhưng phải nói ra — trần
     khẩu hình tiếng Việt của Duix chính là hệ quả của việc này.
     """
-    verified = capability.languages_verified
-    if "multi" in verified or language in verified:
+    if language_is_verified(capability, language):
         return f"{capability.backend_id}: {capability.audio_encoder} có phủ {language!r}."
     return (
         f"{capability.backend_id}: bộ mã hoá {capability.audio_encoder} mới kiểm chứng "
-        f"cho {sorted(verified)}, KHÔNG gồm {language!r}. Khẩu hình có thể đúng thời "
-        "điểm nhưng sai hình âm."
+        f"cho {sorted(capability.languages_verified)}, KHÔNG gồm {language!r}. Khẩu hình "
+        "có thể đúng thời điểm nhưng sai hình âm."
     )
