@@ -16,6 +16,7 @@ import subprocess
 import time
 import uuid
 import wave
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -35,10 +36,12 @@ from ai_video_agent.orchestrator.repository import ProjectRepository
 from ai_video_agent.providers.base import AvatarRequest
 from ai_video_agent.providers.duix import DuixAvatarProvider, MockDuixAvatarProvider
 from ai_video_agent.providers.musetalk import MockMuseTalkProvider, MuseTalkAvatarProvider
-from ai_video_agent.providers.musetalk.adapter import _to_wsl_path
+from ai_video_agent.providers.musetalk.adapter import MuseTalkJob, _to_wsl_path
 from ai_video_agent.providers.musetalk.capability import (
+    D04G_OBSERVED_PEAK_25FPS_MIB,
     GATE,
     MUSETALK_CAPABILITY,
+    MUSETALK_RESOURCES_BY_FPS,
     REPO_COMMIT,
     REQUIRED_WEIGHTS,
     UNET_SHA256,
@@ -47,6 +50,28 @@ from ai_video_agent.providers.registry import KNOWN_AVATAR, build_provider_set
 from ai_video_agent.providers.resource_budget import ResourceBudget, check_resources
 
 ADAPTER_MODULE = "ai_video_agent.providers.musetalk.adapter"
+
+#: Đường tuyệt đối giả cho interpreter venv. Phải tuyệt đối và không chứa '~' —
+#: đúng hai điều kiện mà hàng rào `_assert_venv_python` đòi.
+VENV_PYTHON = "/opt/venv/musetalk/bin/python"
+
+
+def _ffprobe_stub(
+    *, duration: str = "14.080000", fps: str = "30/1"
+) -> Callable[..., str]:
+    """Stub ffprobe **phân nhánh theo truy vấn**.
+
+    Adapter hỏi hai thứ khác nhau qua cùng một hàm: ``format/stream=duration`` và
+    ``stream=r_frame_rate``. Một stub trả cùng một chuỗi cho cả hai sẽ khiến bộ
+    đọc fps nhận phải chuỗi thời lượng — đúng loại nhầm mà lượt render
+    ``f16bd2a245d4`` đã phơi ra ở tầng thật.
+    """
+
+    def _probe(_bin: str, _clip: Path, entries: str, stream: str | None = "v:0") -> str:
+        del stream
+        return fps if entries == "stream=r_frame_rate" else duration
+
+    return _probe
 
 
 def _wav(path: Path, seconds: float = 1.0, rate: int = 48_000) -> Path:
@@ -108,9 +133,17 @@ def test_registry_dung_duoc_ca_hai_che_do(tmp_path: Path) -> None:
     assert isinstance(real.avatar, MuseTalkAvatarProvider)
 
 
-def test_adapter_that_khong_chay_duoc_vi_gate_dong(tmp_path: Path) -> None:
-    """Dựng được, hỏi được danh tính — nhưng generate() thì không."""
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+def test_adapter_that_chan_khi_gate_dong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate đóng ⇒ ``generate()`` không chạy, dù ``info()`` vẫn trả lời được.
+
+    Ép gate đóng thay vì dựa vào ``CURRENT_GATE``: PO đã mở D04G cho lượt
+    bake-off 25 fps, nên nếu test dựa vào trạng thái toàn cục thì điều khoản
+    quan trọng nhất của hợp đồng sẽ ngừng được kiểm đúng lúc nó cần nhất.
+    """
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: False)
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
 
     assert provider.info().name == "musetalk"
     with pytest.raises(GateNotReachedError):
@@ -126,16 +159,37 @@ def test_gate_khai_dung_o_moi_noi() -> None:
     assert MuseTalkAvatarProvider().info().gate == "D04G"
 
 
-def test_gate_d04g_dong_theo_cau_truc() -> None:
-    """``D04G`` không nằm trong GATES, mà ``gate_is_open`` từ chối tên gate lạ.
+def test_d04g_nam_dung_cho_giua_d04_va_d05() -> None:
+    """Vị trí trong ``GATES`` quyết định gate nào mở kèm gate nào.
 
-    Nghĩa là gate đóng **theo cấu trúc**, không phụ thuộc vào việc ai đó nhớ
-    đóng nó. Mở D04G = thêm tên vào ``GATES`` — thấy được trong diff.
+    ``gate_is_open`` so theo **chỉ số**, nên đặt sai chỗ là mở nhầm: sau ``D05``
+    thì D04G sẽ tự mở mỗi khi D05 mở; trước ``D04`` thì nó mở ngay từ D04.
     """
-    assert "D04G" not in GATES
+    assert GATES.index("D04") < GATES.index("D04G") < GATES.index("D05")
+
+
+def test_d04g_da_dong_lai_sau_bake_off() -> None:
+    """Bake-off xong ⇒ gate đóng lại. Duix giữ production, MuseTalk là research.
+
+    ``D04G`` vẫn nằm trong ``GATES`` để giữ đúng thứ tự đã dùng, nhưng đóng vì nó
+    đứng **sau** ``CURRENT_GATE``. Adapter thật của MuseTalk vì thế không chạy
+    được, đúng như trước lúc PO mở gate.
+    """
     assert gate_is_open("D04G") is False
-    #: Kể cả khi giả định gate hiện tại đã lên tới D05.
-    assert gate_is_open("D04G", current="D05") is False
+    assert gate_is_open("D05") is False
+    #: Các gate đã duyệt trước đó không bị ảnh hưởng.
+    assert gate_is_open("D04") is True
+    assert gate_is_open("D03") is True
+
+
+def test_gate_la_toan_cuc_chu_khong_theo_tung_luot() -> None:
+    """Ghi lại đúng bản chất: không có "gate riêng cho một lượt".
+
+    Mở D04G nghĩa là **mọi** lời gọi ``generate()`` của MuseTalk đều chạy được,
+    không chỉ lượt 25 fps đã duyệt. Đóng lại = hạ ``CURRENT_GATE`` về ``"D04"``.
+    """
+    assert gate_is_open("D04G", current="D04") is False
+    assert gate_is_open("D04G", current="D04G") is True
 
 
 def test_mock_khong_muon_gate_cua_ban_that() -> None:
@@ -151,8 +205,11 @@ def test_gate_chan_truoc_khi_goi_subprocess(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Gài bom vào subprocess: chạm tới nó nghĩa là hàng rào đứng sai chỗ."""
+    #: Ép gate đóng thay vì dựa vào `CURRENT_GATE` — xem ghi chú ở
+    #: `test_adapter_that_chan_khi_gate_dong`.
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: False)
     monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
 
     with pytest.raises(GateNotReachedError):
         provider.generate(_request(tmp_path), tmp_path / "out.mp4")
@@ -169,7 +226,7 @@ def test_bom_that_su_no_khi_moi_hang_rao_da_qua(
     monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
     monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
     monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
 
     with pytest.raises(AssertionError, match="sai thứ tự hàng rào"):
         provider.generate(_request(tmp_path), tmp_path / "out.mp4")
@@ -364,7 +421,9 @@ def test_thieu_weights_noi_ro_thieu_file_nao(
 ) -> None:
     monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
     thieu = ("models/musetalkV15/unet.pth", "models/whisper/pytorch_model.bin")
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path, missing=thieu))
+    provider = MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path, missing=thieu), venv_python=VENV_PYTHON
+    )
 
     with pytest.raises(ProviderError) as exc:
         provider.generate(_request(tmp_path), tmp_path / "out.mp4")
@@ -378,7 +437,7 @@ def test_thieu_weights_noi_ro_thieu_file_nao(
 def test_thieu_wsl_hong_ro(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
     monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: None)
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
 
     with pytest.raises(ProviderError, match="không tự khởi động WSL"):
         provider.generate(_request(tmp_path), tmp_path / "out.mp4")
@@ -394,12 +453,16 @@ def _mo_hang_rao_moi_truong(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
     monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
     monkeypatch.setattr(f"{ADAPTER_MODULE}._wsl_file_is_executable", lambda *_a: True)
+    #: Hàng rào fps gọi ffprobe trên **video nguồn** trước khi chạm GPU, mà nguồn
+    #: trong test chỉ là vài byte giả. Stub mặc định 30/1 để khớp ``fps`` mặc định
+    #: của adapter; test nào cần khác thì vá đè sau lời gọi này.
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub())
 
 
 def _armed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MuseTalkAvatarProvider:
     """Adapter đã qua hết hàng rào, chỉ còn lớp subprocess do test điều khiển."""
     _mo_hang_rao_moi_truong(monkeypatch)
-    return MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+    return MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
 
 
 class _Completed:
@@ -496,12 +559,12 @@ def test_timeout_khong_thu_lai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 def test_dong_lenh_tro_dung_venv_va_repo(tmp_path: Path) -> None:
     repo = _fake_install(tmp_path)
-    provider = MuseTalkAvatarProvider(install_dir=repo)
+    provider = MuseTalkAvatarProvider(install_dir=repo, venv_python=VENV_PYTHON)
     cmd = provider.build_command(repo / "cfg.yaml", tmp_path / "res")
     text = " ".join(cmd)
 
     assert cmd[0] == "wsl.exe"
-    assert "bakeoff-envs/musetalk/bin/python" in text, "phải dùng python CỦA VENV"
+    assert VENV_PYTHON in text, "phải dùng python CỦA VENV, không phải python hệ thống"
     assert "-m scripts.inference" in text
     assert "--version v15" in text
     assert "--use_float16" in text
@@ -510,7 +573,7 @@ def test_dong_lenh_tro_dung_venv_va_repo(tmp_path: Path) -> None:
 def test_dong_lenh_khong_tu_cai_dat_gi(tmp_path: Path) -> None:
     """Không được có pip/apt/git clone/wget/curl trong lệnh."""
     repo = _fake_install(tmp_path)
-    provider = MuseTalkAvatarProvider(install_dir=repo)
+    provider = MuseTalkAvatarProvider(install_dir=repo, venv_python=VENV_PYTHON)
     text = " ".join(provider.build_command(repo / "c.yaml", tmp_path))
 
     for cam in ("pip ", "apt ", "apt-get", "git clone", "wget", "curl", "conda", "huggingface-cli"):
@@ -529,7 +592,7 @@ def _parse_config(yaml_text: str) -> dict[str, str]:
 def test_dau_vao_di_qua_yaml_chu_khong_qua_co_dong_lenh(tmp_path: Path) -> None:
     """MuseTalk đọc video/audio TỪ FILE YAML. Truyền qua cờ sẽ bị bỏ qua im lặng."""
     request = _request(tmp_path)
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
     task = _parse_config(provider.config_yaml(request))
 
     assert task["video_path"].endswith("/avatar.mp4")
@@ -539,7 +602,9 @@ def test_dau_vao_di_qua_yaml_chu_khong_qua_co_dong_lenh(tmp_path: Path) -> None:
 def test_duong_dan_windows_doi_sang_dang_wsl(tmp_path: Path) -> None:
     request = _request(tmp_path)
     task = _parse_config(
-        MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path)).config_yaml(request)
+        MuseTalkAvatarProvider(
+            install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON
+        ).config_yaml(request)
     )
 
     for value in task.values():
@@ -557,7 +622,7 @@ def test_config_giu_nguyen_duong_dan_la(tmp_path: Path, ten_thu_muc: str) -> Non
     la = tmp_path / ten_thu_muc
     la.mkdir()
     request = _request(la)
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
 
     task = _parse_config(provider.config_yaml(request))
 
@@ -596,7 +661,9 @@ def test_bash_nhan_dung_tung_gia_tri_du_duong_dan_la(tmp_path: Path, ten_thu_muc
     la = tmp_path / ten_thu_muc
     la.mkdir()
     repo = _fake_install(la)
-    provider = MuseTalkAvatarProvider(install_dir=repo, hf_home=la / "hf cache")
+    provider = MuseTalkAvatarProvider(
+        install_dir=repo, hf_home=la / "hf cache", venv_python=VENV_PYTHON
+    )
 
     config_path = la / "job dir" / "inference.yaml"
     result_dir = la / "job dir"
@@ -611,7 +678,9 @@ def test_cd_va_hf_home_cung_duoc_quote(tmp_path: Path) -> None:
     la = tmp_path / "thu muc co khoang trang"
     la.mkdir()
     repo = _fake_install(la)
-    provider = MuseTalkAvatarProvider(install_dir=repo, hf_home=la / "hf cache")
+    provider = MuseTalkAvatarProvider(
+        install_dir=repo, hf_home=la / "hf cache", venv_python=VENV_PYTHON
+    )
 
     script = _script_of(provider.build_command(la / "c.yaml", la))
     cd_doan, hf_doan = script.split(" && ")[0], script.split(" && ")[1]
@@ -623,7 +692,9 @@ def test_cd_va_hf_home_cung_duoc_quote(tmp_path: Path) -> None:
 def test_khong_dung_shell_true(tmp_path: Path) -> None:
     """argv ngoài cùng vẫn là list; không bao giờ giao cả chuỗi cho shell của host."""
     repo = _fake_install(tmp_path)
-    cmd = MuseTalkAvatarProvider(install_dir=repo).build_command(repo / "c.yaml", tmp_path)
+    cmd = MuseTalkAvatarProvider(install_dir=repo, venv_python=VENV_PYTHON).build_command(
+        repo / "c.yaml", tmp_path
+    )
 
     assert isinstance(cmd, tuple)
     assert cmd[0] == "wsl.exe"
@@ -638,7 +709,7 @@ def _armed_with_probe(
 ) -> MuseTalkAvatarProvider:
     """Qua hết hàng rào; subprocess và ffprobe do test điều khiển."""
     provider = _armed(tmp_path, monkeypatch)
-    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: duration)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub(duration=duration))
     return provider
 
 
@@ -816,10 +887,12 @@ def test_output_duration_lay_tu_probe_video(
 def test_probe_duoc_goi_dung_file_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    da_do: list[Path] = []
+    do_thoi_luong: list[Path] = []
 
-    def _spy(_bin: str, clip: Path, _entries: str, **_k: object) -> str:
-        da_do.append(clip)
+    def _spy(_bin: str, clip: Path, entries: str, **_k: object) -> str:
+        if entries == "stream=r_frame_rate":
+            return "30/1"
+        do_thoi_luong.append(clip)
         return "9.5"
 
     provider = _armed(tmp_path, monkeypatch)
@@ -828,7 +901,9 @@ def test_probe_duoc_goi_dung_file_output(
 
     result = provider.generate(_request(tmp_path), tmp_path / "out.mp4")
 
-    assert da_do == [result.path], "phải đo đúng file output, không đo file khác"
+    #: Chỉ lọc truy vấn THỜI LƯỢNG: truy vấn fps còn hỏi cả video nguồn, nên gộp
+    #: chung sẽ không nói được điều test này định nói.
+    assert do_thoi_luong == [result.path], "phải đo đúng file output, không đo file khác"
 
 
 def test_thoi_luong_audio_ghi_rieng_va_dung_ten(
@@ -887,12 +962,15 @@ def test_gate_chan_truoc_mkdir_config_probe_va_subprocess(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Không thư mục job, không file config, không probe, không subprocess."""
+    #: Ép gate đóng: PO đã mở D04G cho lượt 25 fps, nên không được dựa vào
+    #: `CURRENT_GATE` toàn cục để kiểm điều khoản này.
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: False)
     monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
     monkeypatch.setattr(
         f"{ADAPTER_MODULE}._ffprobe_entries",
         lambda *_a, **_k: pytest.fail("đã probe dù gate đóng"),
     )
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
     cache = tmp_path / "cache"
     cache.mkdir()
 
@@ -992,7 +1070,7 @@ def test_thieu_ffprobe_hong_truoc_khi_chay_gpu(
         lambda name: None if "ffprobe" in name else "/usr/bin/wsl.exe",
     )
     monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
 
     with pytest.raises(ProviderError, match="ffprobe"):
         provider.generate(_request(tmp_path), tmp_path / "out.mp4")
@@ -1048,12 +1126,92 @@ def test_thieu_ffmpeg_trong_wsl_hong_truoc_khi_chay_gpu(
     """ffmpeg chỉ dùng ở bước mux CUỐI — sai đường dẫn sẽ hỏng sau khi tốn GPU."""
     monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
     monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
-    monkeypatch.setattr(f"{ADAPTER_MODULE}._wsl_file_is_executable", lambda *_a: False)
+    #: Chỉ ffmpeg thiếu; venv python vẫn có. Nếu trả False cho tất cả thì hàng rào
+    #: venv (đứng trước) sẽ bắn trước và test không kiểm được thứ nó định kiểm.
+    monkeypatch.setattr(
+        f"{ADAPTER_MODULE}._wsl_file_is_executable",
+        lambda _bin, _distro, path: not path.endswith("/ffmpeg"),
+    )
     monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
-    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
 
     with pytest.raises(ProviderError, match="AIVA_MUSETALK_FFMPEG_DIR"):
         provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+
+def test_venv_python_chua_tilde_bi_chan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hồi quy cho lượt render hỏng exit 127 ngày 2026-08-10.
+
+    ``build_command`` quote đường dẫn để chịu khoảng trắng, mà bash **không nở
+    ``~`` trong dấu nháy**. Mặc định cũ ``~/bakeoff-envs/...`` vì thế chạy với
+    một đường dẫn ký tự thật không tồn tại, và chết ngay dòng đầu.
+    """
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._wsl_file_is_executable", lambda *_a: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
+    provider = MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path), venv_python="~/bakeoff-envs/musetalk/bin/python"
+    )
+
+    with pytest.raises(ProviderError, match="exit 127"):
+        provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+
+def test_venv_python_rong_bi_chan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Không khai thì báo phải khai, không tự đoán '/usr/bin/python3'."""
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python="  ")
+
+    with pytest.raises(ProviderError, match="AIVA_MUSETALK_VENV_PYTHON"):
+        provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+
+def test_venv_python_tuong_doi_bi_chan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lệnh chạy sau ``cd <repo>`` nên đường tương đối sẽ trỏ nhầm chỗ."""
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._wsl_file_is_executable", lambda *_a: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
+    provider = MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path), venv_python="venv/bin/python"
+    )
+
+    with pytest.raises(ProviderError, match="không phải đường tuyệt đối"):
+        provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+
+def test_venv_python_khong_ton_tai_bi_chan_truoc_gpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(
+        f"{ADAPTER_MODULE}._wsl_file_is_executable",
+        lambda _bin, _distro, path: not path.endswith("/python"),
+    )
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
+
+    with pytest.raises(ProviderError, match="không tự tạo venv"):
+        provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+
+def test_env_ghi_de_duoc_venv_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AIVA_MUSETALK_VENV_PYTHON", "/opt/v/bin/python")
+    assert Config.from_env().musetalk_venv_python == "/opt/v/bin/python"
+
+
+def test_mac_dinh_venv_python_de_rong(tmp_path: Path) -> None:
+    """Mặc định rỗng có chủ đích — mọi giá trị đoán sẵn đều sai kiểu khó thấy."""
+    assert Config(runtime_dir=tmp_path).musetalk_venv_python == ""
+    assert Config.from_env().musetalk_venv_python == ""
 
 
 def test_kiem_dung_duong_dan_ffmpeg_da_cau_hinh(
@@ -1069,16 +1227,18 @@ def test_kiem_dung_duong_dan_ffmpeg_da_cau_hinh(
     monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
     monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
     monkeypatch.setattr(f"{ADAPTER_MODULE}._wsl_file_is_executable", _spy)
-    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.0")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub(duration="14.0"))
     provider = MuseTalkAvatarProvider(
-        install_dir=_fake_install(tmp_path), ffmpeg_dir_wsl="/opt/ffmpeg/bin/"
+        install_dir=_fake_install(tmp_path), ffmpeg_dir_wsl="/opt/ffmpeg/bin/",
+        venv_python=VENV_PYTHON,
     )
     _stub_run_ghi_output(provider, monkeypatch)
 
     provider.generate(_request(tmp_path), tmp_path / "out.mp4")
 
+    #: Kiểm venv python trước, ffmpeg sau — cả hai đều trước GPU.
     #: Dấu gạch chéo thừa ở cuối phải được cắt, không thành "//ffmpeg".
-    assert da_hoi == ["/opt/ffmpeg/bin/ffmpeg"]
+    assert da_hoi == [VENV_PYTHON, "/opt/ffmpeg/bin/ffmpeg"]
 
 
 def test_kiem_ffmpeg_khong_chay_ffmpeg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1122,13 +1282,18 @@ def test_uu_tien_thoi_luong_stream_v0(
 
     def _probe(_bin: str, _clip: Path, entries: str, stream: str | None = "v:0") -> str:
         da_hoi.append((entries, stream))
+        if entries == "stream=r_frame_rate":
+            return "30/1"
         return "13.960000" if entries == "stream=duration" else "14.080000"
 
     monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _probe)
 
     result = provider.generate(_request(tmp_path), tmp_path / "out.mp4")
 
-    assert da_hoi[0] == ("stream=duration", "v:0"), "phải hỏi stream video TRƯỚC"
+    #: Bỏ truy vấn fps ra khỏi phép so thứ tự — nó phục vụ hàng rào fps, không
+    #: thuộc chuỗi đo thời lượng mà test này canh.
+    thoi_luong = [x for x in da_hoi if x[0] != "stream=r_frame_rate"]
+    assert thoi_luong[0] == ("stream=duration", "v:0"), "phải hỏi stream video TRƯỚC"
     assert result.duration_sec == 13.96, "phải lấy số của stream, không lấy container"
     assert result.provenance is not None
     assert result.provenance.params["output_duration_source"] == "video-stream:v:0"
@@ -1142,6 +1307,8 @@ def test_lui_ve_container_khi_stream_khong_co_va_ghi_ro_nguon(
     _stub_run_ghi_output(provider, monkeypatch)
 
     def _probe(_bin: str, _clip: Path, entries: str, stream: str | None = "v:0") -> str:
+        if entries == "stream=r_frame_rate":
+            return "30/1"
         return "N/A" if entries == "stream=duration" else "14.080000"
 
     monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _probe)
@@ -1158,9 +1325,160 @@ def test_ca_hai_nguon_deu_hong_thi_khong_lui_ve_wav(
 ) -> None:
     provider = _armed(tmp_path, monkeypatch)
     _stub_run_ghi_output(provider, monkeypatch)
-    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "N/A")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub(duration="N/A"))
 
     with pytest.raises(ProviderError, match="Không đọc được thời lượng"):
+        provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+
+# --- G2: ước tính tài nguyên không được thấp hơn đỉnh đã đo ----------------
+
+
+def test_uoc_tinh_25fps_khong_thap_hon_dinh_thuc_nghiem() -> None:
+    """Khai thấp hơn số đã đo = hàng rào cho qua rồi OOM giữa chừng.
+
+    Bake-off ghi 9.118 MiB cho 25 fps, nhưng hai run production độc lập đều cho
+    ~10,4 GB. Ngưỡng phải theo số **quan sát được trên đường chạy thật**, không
+    theo báo cáo cũ.
+    """
+    est = MUSETALK_RESOURCES_BY_FPS[25]
+
+    assert est.vram_mib >= D04G_OBSERVED_PEAK_25FPS_MIB, (
+        f"khai {est.vram_mib} MiB nhưng run D04-G2 đã đo đỉnh "
+        f"{D04G_OBSERVED_PEAK_25FPS_MIB} MiB"
+    )
+    assert est.vram_mib != 9_118, "9.118 là số bake-off, không tái lập được ở production"
+    assert est.measured is True
+    assert est.measured_on == "2026-08-10", "phải là ngày của run D04-G2"
+
+
+def test_uoc_tinh_moi_fps_deu_khong_duoi_dinh_da_do() -> None:
+    """Điều khoản áp cho **mọi** fps, không chỉ 25 — thêm fps mới không lọt lưới."""
+    for fps, est in MUSETALK_RESOURCES_BY_FPS.items():
+        assert est.vram_mib > 0
+        assert est.measured is True
+        assert est.measured_on, f"fps {fps} khai measured=True thì phải có ngày đo"
+
+
+def test_25fps_khong_con_re_hon_30fps_mot_cach_vo_ly() -> None:
+    """25 fps ít khung hơn 30 fps, nhưng số đo thật cho thấy nó KHÔNG rẻ hơn.
+
+    Ghi lại nghịch lý này để người sau không "sửa" ngược về 9.118 vì thấy
+    25 < 30 thì VRAM phải nhỏ hơn.
+    """
+    assert MUSETALK_RESOURCES_BY_FPS[25].vram_mib > MUSETALK_RESOURCES_BY_FPS[30].vram_mib
+
+
+# --- G2/fps: hồi quy cho run f16bd2a245d4 ---------------------------------
+
+
+def test_fps_yeu_cau_khac_fps_nguon_thi_chan_truoc_gpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hồi quy trực tiếp cho lượt ``f16bd2a245d4``.
+
+    Truyền ``--fps 25`` với nguồn 30 fps: MuseTalk lấy fps TỪ NGUỒN nên sinh ra
+    video 30 fps, trong khi đặc trưng tiếng băm theo 25. Lượt đó "thành công"
+    nhưng điều kiện thí nghiệm đã hỏng, và không ai biết cho tới lúc soi ffprobe.
+    """
+    _mo_hang_rao_moi_truong(monkeypatch)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub(fps="30/1"))
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
+    provider = MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON, fps=25
+    )
+
+    with pytest.raises(ProviderError, match="lấy fps TỪ NGUỒN"):
+        provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+
+def test_fps_khop_nguon_thi_di_tiep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hàng rào không được chặn nhầm cấu hình đúng."""
+    provider = _armed(tmp_path, monkeypatch)  # fps mặc định 30, stub nguồn 30/1
+    _stub_run_ghi_output(provider, monkeypatch)
+
+    assert provider.generate(_request(tmp_path), tmp_path / "out.mp4").path.is_file()
+
+
+def test_output_fps_do_tu_file_chu_khong_lay_tu_co(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``AvatarResult.fps`` phải là số ĐO ĐƯỢC, không phải cờ đã truyền."""
+    _mo_hang_rao_moi_truong(monkeypatch)
+
+    def _probe(_bin: str, clip: Path, entries: str, stream: str | None = "v:0") -> str:
+        del stream
+        if entries == "stream=r_frame_rate":
+            #: Nguồn 25 fps (hàng rào cho qua) nhưng file MuseTalk sinh ra 30 fps —
+            #: đúng tình huống của run f16bd2a245d4.
+            return "25/1" if clip.name == "avatar.mp4" else "30/1"
+        return "14.080000"
+
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _probe)
+    provider = MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON, fps=25
+    )
+    _stub_run_ghi_output(provider, monkeypatch)
+
+    result = provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    assert result.fps == 30, "phải khai fps THẬT của file, không phải cờ --fps 25"
+    assert result.provenance is not None
+    assert result.provenance.params["requested_fps_flag"] == "25"
+    assert result.provenance.params["output_fps_raw"] == "30/1"
+
+
+def test_source_fps_trong_provenance_do_tu_video_nguon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kiểm ở tầng ĐƠN VỊ, không qua ``generate()``.
+
+    Qua ``generate()`` thì hàng rào fps đã ép ``self._fps == source_fps``, nên
+    "đo từ file" và "lấy từ cờ" cho ra cùng con số và test không phân biệt được.
+    Gọi thẳng ``_provenance`` với hai giá trị lệch nhau mới khoá được điều khoản.
+    """
+    _mo_hang_rao_moi_truong(monkeypatch)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub(fps="30/1"))
+    provider = MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON, fps=25
+    )
+    request = _request(tmp_path)
+    job = MuseTalkJob(
+        code="test", command=(), config_yaml="", config_path=tmp_path / "c.yaml",
+        config_sha256="x", result_dir=tmp_path, started_monotonic=0.0, started_wall=0.0,
+    )
+
+    prov = provider._provenance(request, job, "video-stream:v:0")
+
+    assert prov.source_fps == 30, "phải là fps ĐO ĐƯỢC của nguồn, không phải cờ 25"
+    assert prov.params["source_fps_raw"] == "30/1"
+    assert prov.params["requested_fps_flag"] == "25"
+
+
+def test_fps_khong_doc_duoc_thi_fail_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mo_hang_rao_moi_truong(monkeypatch)
+    monkeypatch.setattr(
+        f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub(fps="khong-phai-ty-so")
+    )
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
+
+    with pytest.raises(ProviderError, match="Không đọc được fps"):
+        provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+
+def test_fps_chia_khong_thi_fail_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``0/0`` là giá trị ffprobe hay trả cho stream không có fps."""
+    _mo_hang_rao_moi_truong(monkeypatch)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub(fps="0/0"))
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path), venv_python=VENV_PYTHON)
+
+    with pytest.raises(ProviderError, match="fps không hợp lệ"):
         provider.generate(_request(tmp_path), tmp_path / "out.mp4")
 
 
@@ -1280,7 +1598,7 @@ def _armed_with_vram(
     không phải chờ.
     """
     _mo_hang_rao_moi_truong(monkeypatch)
-    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.080000")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub())
 
     con_lai = list(free_mau or [])
 
@@ -1291,6 +1609,7 @@ def _armed_with_vram(
 
     return MuseTalkAvatarProvider(
         install_dir=_fake_install(tmp_path),
+        venv_python=VENV_PYTHON,
         vram_sampler=_sampler,
         vram_total_probe=lambda: total,
         vram_sample_interval_sec=0.001,
@@ -1381,7 +1700,7 @@ def test_sampler_loi_tam_thoi_van_tiep_tuc_lay_mau(
     biết. Bỏ ``except`` ⇒ test này đỏ.
     """
     _mo_hang_rao_moi_truong(monkeypatch)
-    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.0")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub(duration="14.0"))
     lan = {"n": 0}
 
     def _hong_lan_dau() -> int | None:
@@ -1392,6 +1711,7 @@ def test_sampler_loi_tam_thoi_van_tiep_tuc_lay_mau(
 
     provider = MuseTalkAvatarProvider(
         install_dir=_fake_install(tmp_path),
+        venv_python=VENV_PYTHON,
         vram_sampler=_hong_lan_dau,
         vram_total_probe=lambda: 12_282,
         vram_sample_interval_sec=0.001,
@@ -1452,9 +1772,10 @@ def test_mac_dinh_khong_tu_goi_nvidia_smi_trong_test(
     chạy nvidia-smi thật. Test này canh đúng điều đó.
     """
     _mo_hang_rao_moi_truong(monkeypatch)
-    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.0")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _ffprobe_stub(duration="14.0"))
     provider = MuseTalkAvatarProvider(
-        install_dir=_fake_install(tmp_path), vram_sample_interval_sec=0.001
+        install_dir=_fake_install(tmp_path), vram_sample_interval_sec=0.001,
+        venv_python=VENV_PYTHON,
     )
     _cho_lay_mau(provider, monkeypatch)
 
@@ -1497,6 +1818,8 @@ def test_output_duration_source_di_toi_manifest(
     _stub_run_ghi_output(provider, monkeypatch)
 
     def _probe(_bin: str, _clip: Path, entries: str, stream: str | None = "v:0") -> str:
+        if entries == "stream=r_frame_rate":
+            return "30/1"
         return "N/A" if entries == "stream=duration" else "14.080000"
 
     monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _probe)

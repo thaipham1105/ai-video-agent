@@ -66,6 +66,11 @@ def _build_avatar(name: str, mode: ProviderMode, config: Config) -> AvatarProvid
             #: Thư mục ffmpeg **trong WSL** cho MuseTalk. Khác `ffprobe_bin` ở trên
             #: (chạy trên host) — hai môi trường khác nhau, không gộp được.
             ffmpeg_dir_wsl=config.musetalk_ffmpeg_dir,
+            #: 30 mặc định (lượt chính thức); 25 là fps huấn luyện gốc, phải khai
+            #: tường minh qua AIVA_MUSETALK_FPS.
+            fps=config.musetalk_fps,
+            #: Đường tuyệt đối trong WSL. Rỗng ⇒ hàng rào báo ngay, không đoán.
+            venv_python=config.musetalk_venv_python,
         )
 
     if mode is ProviderMode.MOCK:

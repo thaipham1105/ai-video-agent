@@ -54,17 +54,55 @@ MUSETALK_LOCAL = PriceBook(
     assumption="MuseTalk 1.5 (MIT) chạy local trong WSL2 + GPU của máy. Chi phí = thời gian GPU.",
 )
 
-#: Đo ở bake-off D04 cho clip 7,6 s ở 1080x1920.
-#: **Dùng số của 30 fps**, không dùng số 25 fps (9.118 MiB): D04-G chạy 30 fps,
-#: khai số thấp hơn thực tế sẽ để hàng rào tài nguyên cho qua rồi OOM giữa chừng.
-MUSETALK_RESOURCES = ResourceEstimate(
-    vram_mib=9_798,
-    ram_mib=15_360,
-    storage_mib=30_720,
-    deterministic_local=True,
-    measured=True,
-    measured_on="2026-08-06",
-)
+#: Đo ở bake-off D04 cho clip 7,6 s ở 1080x1920. **fps đổi thì VRAM đổi thật** —
+#: 25 fps sinh 192 khung, 30 fps sinh 230 khung, và cả hai số dưới đây đều đo
+#: trên chính máy này (báo cáo bake-off §7).
+#:
+#: Khai một con số cho mọi fps là sai theo cả hai chiều: lấy số 30 fps cho lượt
+#: 25 fps thì hàng rào chặn nhầm một cấu hình chạy được; lấy số 25 fps cho lượt
+#: 30 fps thì nó cho qua rồi OOM giữa chừng.
+#: Peak VRAM quan sát được trên đường chạy production của D04-G. **Cao hơn số
+#: bake-off rất nhiều**, và đây là số được dùng để đặt ngưỡng cho 25 fps:
+#:
+#: * ``f16bd2a245d4`` — 10.418 MiB. Run **INVALID/INCONCLUSIVE** (nguồn 30 fps
+#:   nên MuseTalk sinh 30 fps dù truyền ``--fps 25``). Giữ làm bằng chứng, không
+#:   dùng làm cơ sở kết luận.
+#: * ``10a88c290ee8`` — 10.354 MiB. Run **D04-G2 HỢP LỆ**: nguồn/avatar/output
+#:   đều đo được 25/1 fps.
+#:
+#: Bake-off từng ghi 9.118 MiB cho 25 fps, nhưng con số đó **không tái lập được**
+#: trên đường production — hai run độc lập đều cho ~10,4 GB. Nguyên nhân nhiều
+#: khả năng là khác biệt kích thước/độ dài nguồn và cách adapter đo (lấy mẫu
+#: 1 s bắt được đỉnh mà script bake-off có thể bỏ lỡ).
+D04G_OBSERVED_PEAK_25FPS_MIB = 10_354
+
+MUSETALK_RESOURCES_BY_FPS: dict[int, ResourceEstimate] = {
+    25: ResourceEstimate(
+        #: Bảo thủ hơn đỉnh hợp lệ đã quan sát (10.354) một biên ~250 MiB.
+        #: Khai thấp hơn số đã đo là để hàng rào cho qua rồi OOM giữa chừng —
+        #: đúng thứ ``ResourceEstimate`` sinh ra để chặn.
+        vram_mib=10_600,
+        ram_mib=15_360,
+        storage_mib=30_720,
+        deterministic_local=True,
+        measured=True,
+        #: Ngày của run D04-G2, không phải ngày bake-off: con số này đến từ
+        #: thực nghiệm production, không phải từ báo cáo cũ.
+        measured_on="2026-08-10",
+    ),
+    30: ResourceEstimate(
+        vram_mib=9_798,
+        ram_mib=15_360,
+        storage_mib=30_720,
+        deterministic_local=True,
+        measured=True,
+        measured_on="2026-08-06",
+    ),
+}
+
+#: Mặc định khai theo **30 fps** — cấu hình chính thức của D04G design §5.2, và
+#: là số cao hơn, nên nơi nào chưa biết fps thì vẫn an toàn theo hướng đúng.
+MUSETALK_RESOURCES = MUSETALK_RESOURCES_BY_FPS[30]
 
 MUSETALK_CAPABILITY = AvatarCapability(
     backend_id="musetalk",

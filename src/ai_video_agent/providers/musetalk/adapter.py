@@ -65,7 +65,7 @@ from ai_video_agent.providers.musetalk.capability import (
     GATE,
     MUSETALK_CAPABILITY,
     MUSETALK_LOCAL,
-    MUSETALK_RESOURCES,
+    MUSETALK_RESOURCES_BY_FPS,
     REPO_COMMIT,
     REQUIRED_WEIGHTS,
     UNET_SHA256,
@@ -259,6 +259,10 @@ class MuseTalkJob:
     peak_vram_mib: int | None = None
     stderr_tail: str = ""
     produced: Path | None = None
+    #: Tỷ số fps thô của file đầu ra (``30/1``, ``30000/1001``…). Giữ nguyên vì
+    #: làm tròn về int là mất thông tin mà schema manifest chỉ nhận int.
+    output_fps_raw: str = ""
+    source_fps_raw: str = ""
     params: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -273,7 +277,10 @@ class MuseTalkAvatarProvider:
         self,
         *,
         install_dir: Path | None = None,
-        venv_python: str = "~/bakeoff-envs/musetalk/bin/python",
+        #: Đường **tuyệt đối** trong WSL. Rỗng là mặc định có chủ đích — xem
+        #: ``Config.musetalk_venv_python``. Hàng rào ở :meth:`_assert_venv_python`
+        #: từ chối cả chuỗi rỗng lẫn ``~`` chưa nở.
+        venv_python: str = "",
         wsl_distro: str = "Ubuntu",
         wsl_bin: str = "wsl.exe",
         fps: int = 30,
@@ -334,13 +341,19 @@ class MuseTalkAvatarProvider:
         return MUSETALK_CAPABILITY
 
     def estimate_resources(self, request: AvatarRequest) -> ResourceEstimate:
-        """VRAM do kích thước khung và model quyết định, không do thời lượng.
+        """VRAM theo **fps đã cấu hình**, không do thời lượng clip.
 
-        Bake-off đo 9.798 MiB @30fps cho clip 7,6 s. Nhân theo ``duration_sec``
-        sẽ là một công thức bịa — tệ hơn một số đo.
+        Bake-off đo 9.118 MiB @25fps và 9.798 MiB @30fps cho cùng clip 7,6 s —
+        fps đổi thì số khung đổi, và VRAM đổi theo. Nhân theo ``duration_sec``
+        thì ngược lại sẽ là một công thức bịa, tệ hơn một số đo.
+
+        fps lạ (không có số đo) thì lấy mức **cao nhất** đã đo: thà chặn nhầm
+        một lượt chạy được còn hơn cho qua rồi OOM giữa chừng.
         """
         del request
-        return MUSETALK_RESOURCES
+        if self._fps in MUSETALK_RESOURCES_BY_FPS:
+            return MUSETALK_RESOURCES_BY_FPS[self._fps]
+        return max(MUSETALK_RESOURCES_BY_FPS.values(), key=lambda r: r.vram_mib)
 
     def quote(self, request: AvatarRequest) -> CostQuote:
         """Báo giá chạy được ở mọi gate — không chạm WSL, không nạp model."""
@@ -508,6 +521,9 @@ class MuseTalkAvatarProvider:
         # ffmpeg của MuseTalk nằm TRONG WSL và chỉ được dùng ở bước mux **cuối
         # cùng**. Sai đường dẫn ⇒ hỏng sau khi GPU đã chạy xong — đúng kịch bản
         # tệ nhất cho một lượt không được thử lại. Nên hỏi ngay bây giờ.
+        # Interpreter kiểm ngay sau WSL: thiếu nó thì mọi thứ sau đều vô nghĩa.
+        self._assert_venv_python()
+
         ffmpeg_path = f"{self._ffmpeg_dir_wsl.rstrip('/')}/ffmpeg"
         if not _wsl_file_is_executable(self._wsl_bin, self._wsl_distro, ffmpeg_path):
             msg = (
@@ -516,6 +532,47 @@ class MuseTalkAvatarProvider:
                 "chỉ dùng nó ở bước ghép cuối, nên sai đường dẫn sẽ hỏng SAU khi đã tốn "
                 "hết thời gian GPU. Khai AIVA_MUSETALK_FFMPEG_DIR trỏ đúng thư mục "
                 "chứa ffmpeg (adapter không tự cài)."
+            )
+            raise ProviderError(msg)
+
+    def _assert_venv_python(self) -> None:
+        """Interpreter phải là đường **tuyệt đối** và chạy được, kiểm trước GPU.
+
+        Bài học từ lượt render hỏng exit 127: mặc định cũ là ``~/bakeoff-envs/…``,
+        và ``build_command`` bọc nó bằng :func:`shlex.quote` để chịu được khoảng
+        trắng — nhưng **bash không nở ``~`` bên trong dấu nháy**. Lệnh chạy với
+        một đường dẫn ký tự thật không tồn tại, và chết ngay dòng đầu.
+
+        Hai yêu cầu đối nhau ở đây: quote thì an toàn với khoảng trắng nhưng giết
+        tilde; không quote thì nở tilde nhưng vỡ với khoảng trắng. Cách thoát là
+        **đòi đường tuyệt đối** — lúc đó quote luôn đúng và không cần nở gì.
+        """
+        path = self._venv_python.strip()
+        if not path:
+            msg = (
+                "Chưa khai python của venv MuseTalk. Adapter không đoán: "
+                "'/usr/bin/python3' tồn tại thật nhưng thiếu toàn bộ gói MuseTalk, "
+                "và lỗi sẽ chỉ lộ ra sau khi đã nạp nửa chừng. Khai "
+                "AIVA_MUSETALK_VENV_PYTHON bằng đường dẫn tuyệt đối trong WSL."
+            )
+            raise ProviderError(msg)
+        if "~" in path:
+            msg = (
+                f"venv python {path!r} chứa '~'. Dòng lệnh được quote để chịu khoảng "
+                "trắng, mà bash KHÔNG nở '~' trong dấu nháy — lệnh sẽ chết với "
+                "exit 127. Khai đường dẫn tuyệt đối, ví dụ /home/<user>/.../bin/python."
+            )
+            raise ProviderError(msg)
+        if not path.startswith("/"):
+            msg = (
+                f"venv python {path!r} không phải đường tuyệt đối. Lệnh chạy sau "
+                "'cd <repo>' nên đường tương đối sẽ trỏ nhầm chỗ."
+            )
+            raise ProviderError(msg)
+        if not _wsl_file_is_executable(self._wsl_bin, self._wsl_distro, path):
+            msg = (
+                f"Không thấy python chạy được tại {path!r} trong WSL "
+                f"{self._wsl_distro!r}. Adapter không tự tạo venv và không tự cài gì."
             )
             raise ProviderError(msg)
 
@@ -564,6 +621,7 @@ class MuseTalkAvatarProvider:
         self._assert_avatar_source(request)
         self._assert_runtime_ready()
         check_avatar_request(self.capability(), request, source_is_image=False)
+        self._assert_source_fps_matches(request)
 
         # Mã job phải duy nhất **thật sự**. Chỉ dùng timestamp theo giây thì hai
         # lượt cùng shot trong cùng một giây sẽ dùng chung thư mục, và lượt sau
@@ -625,12 +683,16 @@ class MuseTalkAvatarProvider:
         #: ``output_duration_sec`` của manifest, và cổng kiểm lệch A/V của
         #: D04-G §6.3 sẽ luôn bằng 0 nếu hai vế cùng đến từ một nguồn.
         duration_sec, duration_source = self._probe_video_duration(produced)
+        #: fps ĐO TỪ FILE, không lấy ``self._fps``. Cờ ``--fps`` không quyết định
+        #: fps đầu ra khi đầu vào là video — xem :meth:`_probe_video_fps`.
+        output_fps, output_fps_raw = self._probe_video_fps(produced)
+        job.output_fps_raw = output_fps_raw
         return AvatarResult(
             path=produced,
             duration_sec=duration_sec,
             width=request.width,
             height=request.height,
-            fps=self._fps,
+            fps=output_fps,
             is_placeholder=False,
             actual_cost_usd=0.0,
             provenance=self._provenance(request, job, duration_source),
@@ -801,6 +863,56 @@ class MuseTalkAvatarProvider:
         )
         raise ProviderError(msg)
 
+    def _probe_video_fps(self, path: Path) -> tuple[int, str]:
+        """fps **đo từ file**, trả ``(số nguyên đã làm tròn, tỷ số thô)``.
+
+        Vì sao không dùng ``self._fps``: cờ ``--fps`` của MuseTalk **không quyết
+        định fps đầu ra khi đầu vào là video** — nó lấy fps của video nguồn. Lượt
+        ``f16bd2a245d4`` đã lộ ra điều đó: truyền ``--fps 25`` nhưng file sinh ra
+        là 30/1, trong khi manifest vẫn khai 25 vì đọc từ cấu hình.
+
+        Giữ cả tỷ số thô (``30000/1001``) vì làm tròn về int là mất thông tin, mà
+        schema manifest lại chỉ nhận int.
+        """
+        raw = self._probe_entries(path, "stream=r_frame_rate", "v:0").strip()
+        first = raw.splitlines()[0].strip() if raw else ""
+        if "/" not in first:
+            msg = f"Không đọc được fps từ {path} (ffprobe trả {raw!r})."
+            raise ProviderError(msg)
+        num, den = first.split("/", 1)
+        try:
+            value = float(num) / float(den)
+        except (ValueError, ZeroDivisionError) as exc:
+            msg = f"fps không hợp lệ từ {path}: {first!r}."
+            raise ProviderError(msg) from exc
+        if not math.isfinite(value) or value <= 0:
+            msg = f"fps không hợp lệ từ {path}: {value!r}."
+            raise ProviderError(msg)
+        return round(value), first
+
+    def _assert_source_fps_matches(self, request: AvatarRequest) -> None:
+        """fps yêu cầu phải **khớp fps của video nguồn**, kiểm trước khi chạm GPU.
+
+        MuseTalk kế thừa fps từ nguồn. Cho hai giá trị lệch nhau đi qua nghĩa là
+        đặc trưng audio băm theo một nhịp còn khung ghi theo nhịp khác — và kết
+        quả trông vẫn "thành công" trong khi điều kiện thí nghiệm đã hỏng.
+
+        Muốn chạy fps khác thì phải **convert nguồn trước**, thành một tài sản
+        riêng ghi rõ trong manifest, chứ không phải đổi một con số trên dòng lệnh.
+        """
+        if request.avatar_source is None:
+            return
+        source_fps, raw = self._probe_video_fps(request.avatar_source)
+        if source_fps != self._fps:
+            msg = (
+                f"fps yêu cầu {self._fps} khác fps của video nguồn {source_fps} "
+                f"({raw}). MuseTalk lấy fps TỪ NGUỒN, không từ cờ --fps — chạy tiếp "
+                "sẽ ra video ở fps nguồn trong khi đặc trưng tiếng băm theo fps yêu "
+                "cầu. Hãy convert nguồn sang fps mong muốn và đăng ký nó như một tài "
+                "sản riêng, thay vì chỉ đổi tham số."
+            )
+            raise ProviderError(msg)
+
     @staticmethod
     def _input_audio_duration(request: AvatarRequest) -> float:
         """Thời lượng WAV đầu vào — ghi riêng, **không** thay cho thời lượng video."""
@@ -825,13 +937,25 @@ class MuseTalkAvatarProvider:
         #: Nói rõ ``output_duration_sec`` đo từ đâu. Nếu phải lùi về container thì
         #: người đọc manifest phải biết, chứ không đoán.
         params["output_duration_source"] = duration_source
+        #: fps yêu cầu qua cờ **khác** fps thật của file. Ghi cả hai: cờ để tái
+        #: lập lệnh, số đo để biết chuyện gì thực sự xảy ra.
+        params["requested_fps_flag"] = str(self._fps)
+        params["output_fps_raw"] = job.output_fps_raw
+        params["source_fps_raw"] = job.source_fps_raw
+
+        source_fps = self._fps
+        if request.avatar_source is not None:
+            source_fps, raw = self._probe_video_fps(request.avatar_source)
+            params["source_fps_raw"] = raw
+
         return AvatarProvenance(
             backend_id=cap.backend_id,
             backend_version=cap.backend_version,
             model=MODEL,
             model_version=REPO_COMMIT,
             audio_encoder=cap.audio_encoder,
-            source_fps=self._fps,
+            #: ĐO từ video nguồn, không lấy từ cờ ``--fps``.
+            source_fps=source_fps,
             audio_sha256=fingerprint_file(request.audio_path),
             source_asset_sha256=fingerprint_file(request.avatar_source),
             #: Khác Duix: MuseTalk có file checkpoint RỜI nên băm được thật.

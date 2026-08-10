@@ -114,6 +114,22 @@ class Config:
     #: **cuối cùng**, tức sau khi đã tốn hết thời gian GPU.
     musetalk_ffmpeg_dir: str = "/usr/bin"
 
+    #: fps cho MuseTalk. **Mặc định 30** vì D04G design §5.2 chốt 30 fps là lượt
+    #: chính thức duy nhất — đổi mặc định sẽ làm lượt sau lặng lẽ chạy sai điều
+    #: kiện. Lượt 25 fps (fps huấn luyện gốc của model) phải khai tường minh
+    #: ``AIVA_MUSETALK_FPS=25``, và kết quả **không so trực tiếp từng khung**
+    #: với bản Duix 30 fps được nếu chưa chuẩn hoá fps.
+    musetalk_fps: int = 30
+
+    #: Đường dẫn **tuyệt đối** tới python của venv MuseTalk, nhìn từ trong WSL.
+    #:
+    #: Mặc định để **rỗng** có chủ đích: mọi giá trị đoán sẵn đều sai theo một
+    #: kiểu khó thấy. ``~/...`` thì bash không nở trong dấu nháy (đã làm hỏng
+    #: một lượt render với exit 127); ``/usr/bin/python3`` thì tồn tại thật nhưng
+    #: thiếu toàn bộ gói của MuseTalk, và lỗi chỉ lộ ra sau khi đã nạp nửa chừng.
+    #: Rỗng thì hàng rào báo ngay phải khai ``AIVA_MUSETALK_VENV_PYTHON``.
+    musetalk_venv_python: str = ""
+
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
 
@@ -148,6 +164,8 @@ class Config:
             ram_budget_mib=_env_int_or_none("AIVA_RAM_BUDGET_MIB"),
             storage_budget_mib=_env_int_or_none("AIVA_STORAGE_BUDGET_MIB"),
             musetalk_ffmpeg_dir=_env_str("AIVA_MUSETALK_FFMPEG_DIR", "/usr/bin"),
+            musetalk_fps=_env_int("AIVA_MUSETALK_FPS", 30),
+            musetalk_venv_python=_env_str("AIVA_MUSETALK_VENV_PYTHON", ""),
             ffmpeg_bin=_env_str("AIVA_FFMPEG_BIN", "ffmpeg"),
             ffprobe_bin=_env_str("AIVA_FFPROBE_BIN", "ffprobe"),
             video_api_provider=_env_str("AIVA_VIDEO_API_PROVIDER", "none"),

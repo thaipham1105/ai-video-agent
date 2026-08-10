@@ -573,4 +573,122 @@ không gọi API. Chỉ đọc tài liệu đã commit, metadata weights đã gh
 
 ---
 
-D04G_STATUS = THIẾT KẾ ĐÃ DUYỆT — CHỜ DUYỆT BƯỚC TRIỂN KHAI SOURCE
+## 10. KẾT QUẢ — bake-off đã chạy xong
+
+### 10.1 Hai lượt render, một hợp lệ
+
+| Run | Trạng thái | Lý do |
+|---|---|---|
+| `f16bd2a245d4` | **INVALID / INCONCLUSIVE** | Truyền `--fps 25` nhưng nguồn là 30 fps ⇒ MuseTalk sinh video **30 fps**. `--fps` **không** quyết định fps đầu ra khi đầu vào là video — nó lấy fps **từ nguồn**. Manifest lúc đó còn khai `output_fps: 25` vì đọc từ cấu hình chứ không đo từ file. Giữ làm bằng chứng, **không** dùng làm cơ sở kết luận. |
+| `10a88c290ee8` | **VALID — D04-G2, 25 fps** | Nguồn dẫn xuất đã convert **thật** sang 25 fps (`ffmpeg -t 16 -r 25 -an -c:v libx264 -crf 15`, SHA `4a2fa658…9b8e`). Đo được **25/1 fps ở cả ba tầng**: nguồn 400 khung · avatar thô 352 khung · output 351 khung. |
+
+Hai vá sinh ra từ sự cố này, nay đã có test hồi quy: manifest **đo fps từ file** thay vì đọc cấu hình, và một hàng rào chặn sớm khi `fps yêu cầu ≠ fps nguồn`.
+
+Điều kiện giữ nguyên cho cả hai backend: **cùng file WAV** (`0d072f5e…3a03`, đầu ra TTS của D04-F, dùng qua `narration_audio_asset_id` nên **không sinh TTS mới**) và cùng câu thoại 55 âm tiết.
+
+### 10.2 Khẩu hình — 8 mốc âm môi, chấm theo **mốc thời gian tuyệt đối**
+
+fps hai bên khác nhau (Duix 30, MuseTalk 25) nên **không so theo số thứ tự khung**.
+Mỗi mốc trích một cửa sổ **0,32 s** bằng `-ss`/`-t`; Duix ra ~10 khung, MuseTalk ~8 khung
+trong **cùng khoảng thời gian**.
+
+| Mốc | Âm cần thấy | Duix D04-F | MuseTalk D04-G2 |
+|---|---|---|---|
+| `bà` | /b/ bật môi | ❌ | ✅ |
+| `miếng` | /m/ | ✅ | ✅ |
+| `mặt` | /m/ | ❌ | ✅ |
+| `pháp` | /f/ + `-p` | ◐ | ◐ |
+| `gấp` | `-p` cuối | ❌ | ✅ |
+| `vị` | /v/ môi–răng | ❌ | ◐ |
+| `đẹp` | `-p` cuối | ✅ | ✅ |
+| `vay vốn` | /v/ ×2 | ◐ | ◐ |
+| **Tổng** | | **2 đạt / 2 mơ hồ / 4 trượt** | **5 đạt / 3 mơ hồ / 0 trượt** |
+
+**Cổng khẩu hình §7.2 đòi ≥ 6/8. MuseTalk đạt 5/8 ⇒ TRƯỢT.**
+Điều kiện thứ hai của §7.2 thì đạt: **không trượt** mốc `-p` nào trong `pháp`/`gấp`/`đẹp`.
+
+### 10.3 Cảnh báo: điểm khép môi có thể đến từ việc miệng **ít cử động**
+
+Một model gần như không mở miệng sẽ **PASS mọi mốc khép môi một cách tình cờ**.
+Đo độ biến thiên độ sáng vùng miệng theo từng khung:
+
+| | Độ lệch chuẩn | Biên độ |
+|---|---|---|
+| Duix | **7,92** | 43 |
+| MuseTalk | **5,90** (thấp hơn 25%) | 32 (thấp hơn 26%) |
+
+Khớp với §8 của bake-off: biên độ mở miệng MuseTalk 0,113 vs Duix 0,179 (thấp hơn 37%).
+
+**Nên 5/8 không đọc được thành "khẩu hình tốt hơn 2,5 lần".** Ba mốc `◐` của MuseTalk
+đều rơi đúng vào chỗ đòi **động tác phân biệt được** (`/v/` môi–răng, `/f/`) — và ở đó
+nó không thể hiện được gì.
+
+### 10.4 Chất lượng hình — đo bằng **đúng metric bake-off**
+
+Tái lập nguyên `model-bakeoff/metric.py`: ROI `crop=300:170:390:880`, scale 48×48 xám,
+Laplacian tuyệt đối trung bình, lấy mỗi khung thứ 6.
+
+| | Độ nét | So với Duix |
+|---|---|---|
+| Nguồn dẫn xuất 25 fps | 7,77 | *(trần)* |
+| Nguồn gốc | 7,46 | |
+| **Duix D04-F** | **6,76** | 100% |
+| **MuseTalk D04-G2** | **4,58** | **67,8%** |
+
+**Cổng chất lượng hình §7.3 đòi ≥ 85% baseline Duix** ⇒ ngưỡng 5,75. **MuseTalk 4,58 ⇒ TRƯỢT**,
+và trượt xa chứ không sát ngưỡng. Tỷ lệ 67,8% khớp chặt với bake-off (4,77/7,26 = 65,7%).
+
+### 10.5 Ngưỡng vận hành §6.3
+
+| Chỉ số | Ngưỡng | D04-G2 | |
+|---|---|---|---|
+| Render / giây video | ≤ 30 s | **20,8 s/s** | ✅ PASS |
+| **Peak VRAM** | ≤ 10.000 MiB | **10.354 MiB** | ❌ **FAIL** |
+| A/V lệch | ≤ 0,02 s | 0,000 s | ✅ PASS |
+| Giải mã sạch | không lỗi | sạch | ✅ PASS |
+
+Thời gian cải thiện **4 lần** so với run invalid (81,4 → 20,8 s/s). Nguyên nhân là **độ dài
+nguồn**, không phải fps: cắt nguồn từ 66,8 s xuống 16 s. MuseTalk tiền xử lý **toàn bộ**
+video nguồn — một tính chất chưa từng được ghi nhận trước batch này.
+
+### 10.6 Ước tính tài nguyên 25 fps đã cập nhật
+
+`MUSETALK_RESOURCES_BY_FPS[25]`: **9.118 → 10.600 MiB**, `measured_on = 2026-08-10`.
+
+Số 9.118 của bake-off **không tái lập được** trên đường production — hai run độc lập đều
+cho ~10,4 GB (`f16bd2a245d4` 10.418 · `10a88c290ee8` 10.354). Nghịch lý đáng ghi:
+**25 fps tốn VRAM HƠN 30 fps** (10.600 vs 9.798), ngược với trực giác "ít khung hơn thì
+nhẹ hơn" — có test canh để người sau không "sửa" ngược lại.
+
+### 10.7 Kết luận production
+
+> **Giữ Duix làm production winner. MuseTalk là research candidate, KHÔNG production.**
+
+Theo bảng §7.4: khẩu hình **trượt** (5/8 < 6/8) và chất lượng hình **trượt** (4,58 < 5,75)
+⇒ ô thứ tư của ma trận ⇒ giữ Duix.
+
+Nhưng kết quả **không vô nghĩa**. Nó trả lời đúng câu hỏi §0.2 đặt ra:
+
+* Bộ mã hoá Whisper đa ngôn ngữ **thực sự cải thiện** các mốc `/b/`, `/m/`, `-p` mà
+  WeNet/AISHELL trượt — MuseTalk **0 mốc trượt** so với 4 của Duix.
+* Nhưng cải thiện đó **chưa đủ** để qua ngưỡng production, và phải trả giá bằng **độ nét
+  (67,8%)**, **VRAM (vượt trần)** và **độ động của miệng (thấp hơn 25%)**.
+
+Đây là kết cục thứ hai của §7.4 nghiêng sang thứ tư: gần với `LIP-SYNC WINNER —
+PRODUCTION FAIL`, nhưng không đạt cả ngưỡng khẩu hình tuyệt đối. Cảnh báo ở §0.4 đã dự
+đoán đúng.
+
+### 10.8 Điều batch này KHÔNG chứng minh
+
+* **Chỉ một câu thoại, một người nói, một cấu hình.** Không suy rộng ra kiến trúc
+  audio-to-viseme nói chung (§7.5).
+* **Nguồn hai bên khác nhau:** Duix dùng bản gốc 66,8 s HEVC 30 fps; MuseTalk dùng bản
+  cắt 16 s H.264 25 fps. Đánh đổi đã được PO duyệt, nhưng nó là một biến chưa kiểm soát.
+* **Mốc thời gian từng từ vẫn là ước lượng**, không phải forced alignment (M1 chưa chạy).
+  Sai số tác động **giống nhau** lên hai bên nên không thiên vị, nhưng độ chính xác tuyệt
+  đối thì chưa có.
+* **Chặn thử model thứ ba** trừ khi có giả thuyết hoặc bằng chứng mới (§7.5).
+
+---
+
+D04G_STATUS = HOÀN THÀNH — DUIX GIỮ PRODUCTION, MUSETALK LÀ RESEARCH CANDIDATE
