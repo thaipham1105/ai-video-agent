@@ -20,7 +20,7 @@ from ai_video_agent.cli.doctor import Status, run_checks, worst_status
 from ai_video_agent.clock import now_utc
 from ai_video_agent.composer.runner import FfmpegComposer, MockComposer
 from ai_video_agent.config import Config
-from ai_video_agent.domain.enums import AspectRatio, ProjectState, ProviderMode
+from ai_video_agent.domain.enums import AspectRatio, AssetKind, ProjectState, ProviderMode
 from ai_video_agent.domain.project import Approval, BudgetPolicy, Project, ProviderSelection
 from ai_video_agent.errors import AivaError, ProjectNotFoundError
 from ai_video_agent.jsonschemas import SchemaName, iter_errors
@@ -666,6 +666,230 @@ def voice_add(
             "thu lại nhỏ tiếng hơn sẽ cho giọng sạch hơn."
         )
     console.print(f'\n[dim]Thử nhân bản: aiva tts-check --ref-audio "{destination}"[/dim]')
+
+
+# ------------------------------------------------------------------ make -----
+
+
+@app.command()
+def make(
+    brief: Annotated[str, typer.Option("--brief", "-b", help="Nội dung video, tiếng Việt.")],
+    project_id: Annotated[str, typer.Option("--id", help="ID project.")],
+    by: Annotated[
+        str, typer.Option("--by", help="Tên người duyệt kịch bản. Bỏ trống thì chỉ lập kế hoạch.")
+    ] = "",
+    duration: Annotated[
+        float, typer.Option("--duration", "-d", help="Thời lượng mục tiêu (giây).")
+    ] = 45.0,
+    aspect: Annotated[str, typer.Option("--aspect", help="9:16 | 16:9 | 1:1.")] = "9:16",
+    fps: Annotated[int, typer.Option("--fps", help="Khung hình/giây.")] = 30,
+    mock: Annotated[
+        bool,
+        typer.Option("--mock", help="Chạy thử bằng file giả — không GPU, không Docker."),
+    ] = False,
+) -> None:
+    """Chạy trọn một video bằng backend production: lập kế hoạch → duyệt → dựng.
+
+    Gộp ``plan`` + ``approve`` + ``render --provider-mode real --execute`` thành
+    một lệnh, và **dừng lại chỉ ra việc cần làm** khi còn thiếu tài sản, thay vì
+    hỏng giữa chừng. Chạy lại đúng lệnh cũ sau khi bổ sung là nó đi tiếp.
+
+    Backend chốt cứng là **Duix**. MuseTalk là research candidate và không chọn
+    được ở đường này (bake-off D04-G §10).
+
+    Không có ``--by`` thì dừng sau bước lập kế hoạch: duyệt kịch bản là việc của
+    người, không phải thứ để một lệnh tự làm thay.
+    """
+    repo = _repo()
+
+    if not repo.exists(project_id):
+        console.print("[bold]1/4[/bold] Lập kế hoạch…")
+        plan(brief=brief, title="", project_id=project_id, duration=duration,
+             aspect=aspect, fps=fps, budget=0.0, ai_label=True)
+    else:
+        console.print(f"[dim]1/4 Project {project_id} đã có — dùng lại kịch bản hiện tại.[/dim]")
+
+    project = repo.load_project(project_id)
+    if project.providers.avatar != "duix":
+        _fail(
+            f"Project chốt avatar = {project.providers.avatar!r}. Đường production chỉ "
+            "chạy Duix. Sửa providers.avatar trong project.json về \"duix\"."
+        )
+        return
+
+    console.print("[bold]2/4[/bold] Kiểm tài sản…")
+    assets = repo.load_assets(project_id)
+    thieu: list[str] = []
+    if not assets.of_kind(AssetKind.AVATAR_SOURCE):
+        thieu.append(
+            f'  aiva avatar-add "<video.mp4>" --project {project_id} --owner "<Tên>"'
+        )
+    if not assets.of_kind(AssetKind.VOICE_SAMPLE):
+        thieu.append(f'  aiva voice-add "<giong.wav>" --project {project_id} --owner "<Tên>"')
+    if thieu:
+        console.print("[yellow]![/yellow] Còn thiếu tài sản. Chạy các lệnh sau rồi lặp lại:")
+        for dong in thieu:
+            console.print(f"[bold]{dong}[/bold]")
+        console.print(f"\n[dim]Sau đó: aiva make --id {project_id} --brief "
+                      f'"..." --by "<Tên>"[/dim]')
+        return
+    chua_dong_y = assets.blocking()
+    if chua_dong_y:
+        _fail(
+            "Tài sản chưa có đồng ý sử dụng: "
+            + ", ".join(a.id for a in chua_dong_y)
+            + ". Không render khi chưa được phép dùng hình/giọng của người khác."
+        )
+        return
+    console.print(f"  [green]✓[/green] {len(assets.assets)} tài sản, consent đầy đủ")
+
+    if not by:
+        console.print("\n[bold]Dừng ở bước lập kế hoạch.[/bold] Xem kịch bản rồi duyệt:")
+        console.print(f"[bold]  aiva validate {project_id}[/bold]")
+        console.print(
+            f'[bold]  aiva make --id {project_id} --brief "{brief[:40]}…" --by "<Tên bạn>"[/bold]'
+        )
+        return
+
+    console.print(f"[bold]3/4[/bold] Duyệt kịch bản (bởi {by})…")
+    approve(project_id=project_id, by=by, note="aiva make")
+
+    che_do = "mock" if mock else "real"
+    nhan = "file GIẢ, không GPU" if mock else "Duix, chạy local"
+    console.print(f"[bold]4/4[/bold] Dựng video ({nhan})…")
+    render(
+        project_id=project_id,
+        execute=True,
+        provider_mode=che_do,
+        allow_paid=False,
+        only_shot=None,
+        force=False,
+    )
+    if mock:
+        console.print(
+            "\n[yellow]![/yellow] Đây là bản chạy thử bằng file giả. Bỏ [bold]--mock[/bold] "
+            "để dựng video thật."
+        )
+
+
+# ------------------------------------------------------------ avatar-add -----
+
+
+@app.command("avatar-add")
+def avatar_add(
+    source: Annotated[str, typer.Argument(help="Video người đại diện (.mp4) trên máy.")],
+    project_id: Annotated[str, typer.Option("--project", help="ID project.")],
+    owner: Annotated[str, typer.Option("--owner", help="Ai xuất hiện trong video này.")],
+    asset_id: Annotated[str, typer.Option("--id", help="ID tài sản.")] = "avatar-chinh",
+    scope: Annotated[
+        str, typer.Option("--scope", help="Phạm vi được phép dùng.")
+    ] = "Video marketing của chính chủ",
+    evidence: Annotated[str, typer.Option("--evidence", help="Mã hồ sơ đồng ý.")] = "",
+) -> None:
+    """Đưa video người đại diện vào runtime và khai báo đồng ý sử dụng.
+
+    Trước lệnh này, việc đăng ký avatar phải làm bằng tay: chép file, tính SHA-256,
+    sửa ``asset-manifest.json``. Sai một bước là render hỏng ở giữa chừng.
+
+    Backend production (Duix) **chỉ nhận video**, không nhận ảnh tĩnh — lệnh này
+    kiểm luôn điều đó thay vì để người dùng phát hiện sau khi đã chờ render.
+    """
+    from ai_video_agent.domain.assets import AssetEntry, Consent, sha256_file
+    from ai_video_agent.domain.enums import AssetKind, ConsentStatus
+    from ai_video_agent.qc.broll import _probe
+
+    src = Path(source).expanduser()
+    if not src.is_file():
+        _fail(f"Không có file: {src}")
+        return
+
+    repo = _repo()
+    if not repo.exists(project_id):
+        _fail(
+            f"Chưa có project {project_id!r}. Tạo trước bằng:\n"
+            f'  aiva plan --brief "..." --id {project_id}'
+        )
+        return
+
+    cfg = Config.from_env()
+    kich_thuoc = _probe(cfg.ffprobe_bin, src, "stream=width,height")
+    parts = [p for p in kich_thuoc.replace("\n", ",").split(",") if p]
+    if len(parts) < 2:
+        _fail(
+            f"Không đọc được kích thước video từ {src.name}. Cần {cfg.ffprobe_bin!r} "
+            "chạy được — kiểm bằng: aiva doctor"
+        )
+        return
+    rong, cao = int(parts[0]), int(parts[1])
+
+    fps_raw = _probe(cfg.ffprobe_bin, src, "stream=r_frame_rate").split("\n")[0]
+    thoi_luong = _probe(cfg.ffprobe_bin, src, "format=duration", stream=None)
+    khung = _probe(cfg.ffprobe_bin, src, "stream=nb_frames").split("\n")[0]
+
+    if khung.strip() in {"", "N/A", "0", "1"}:
+        _fail(
+            f"{src.name} chỉ có {khung or 'không'} khung hình — đây là ảnh tĩnh. "
+            "Duix là mô hình face2face, cần VIDEO làm nguồn. Quay một đoạn ngắn "
+            "người nói rồi thử lại."
+        )
+        return
+
+    relative = f"avatar/{asset_id}{src.suffix.lower()}"
+    destination = repo.paths(project_id).assets_dir / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(src.read_bytes())
+
+    try:
+        giay = float(thoi_luong)
+    except ValueError:
+        giay = 0.0
+
+    manifest = repo.load_assets(project_id)
+    entry = AssetEntry(
+        id=asset_id,
+        path=relative,
+        sha256=sha256_file(destination),
+        kind=AssetKind.AVATAR_SOURCE,
+        bytes=destination.stat().st_size,
+        source=f"Do người dùng cung cấp: {src.name}",
+        notes=f"{rong}x{cao} @ {fps_raw}, {giay:.2f}s, {khung} khung",
+        consent=Consent(
+            status=ConsentStatus.GRANTED,
+            owner=owner,
+            granted_by=owner,
+            granted_at=now_utc(),
+            scope=scope,
+            evidence_ref=evidence,
+        ),
+    )
+    manifest.assets = [a for a in manifest.assets if a.id != asset_id] + [entry]
+
+    try:
+        manifest_path = repo.save_assets(manifest)
+    except AivaError as exc:
+        _fail(str(exc))
+        return
+
+    console.print(f"[green]✓[/green] Đã đăng ký avatar [bold]{asset_id}[/bold]")
+    console.print(f"  file      : {destination}")
+    console.print(f"  sha256    : {entry.sha256[:16]}…")
+    console.print(f"  kích thước: {rong}x{cao} @ {fps_raw}")
+    console.print(f"  thời lượng: {giay:.2f}s ({khung} khung)")
+    console.print(f"  chủ sở hữu: {owner} (consent = granted)")
+    console.print(f"  manifest  : {manifest_path}")
+
+    project = repo.load_project(project_id)
+    want_w, want_h = project.aspect_ratio.size
+    if (rong, cao) != (want_w, want_h):
+        console.print(
+            f"[yellow]![/yellow] Project cần {want_w}x{want_h} nhưng video là {rong}x{cao}. "
+            "Composer sẽ co giãn và chèn viền đen."
+        )
+    if giay < 5.0:
+        console.print(
+            "[yellow]![/yellow] Video ngắn hơn 5 giây — nguồn quá ngắn thì khẩu hình "
+            "hay bị lặp thấy rõ."
+        )
 
 
 # ------------------------------------------------------------- tts-check -----

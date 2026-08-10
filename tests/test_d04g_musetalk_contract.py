@@ -29,7 +29,7 @@ from ai_video_agent.domain.assets import AssetManifest
 from ai_video_agent.domain.enums import ProjectState, ProviderMode, RenderStage
 from ai_video_agent.domain.project import Approval, Project, ProviderSelection
 from ai_video_agent.domain.storyboard import Storyboard
-from ai_video_agent.errors import GateNotReachedError, ProviderError
+from ai_video_agent.errors import ConfigError, GateNotReachedError, ProviderError
 from ai_video_agent.jsonschemas import SchemaName, validate
 from ai_video_agent.orchestrator.pipeline import Pipeline, RenderOptions
 from ai_video_agent.orchestrator.repository import ProjectRepository
@@ -120,17 +120,54 @@ def test_musetalk_co_trong_registry() -> None:
     assert "musetalk" in KNOWN_AVATAR
 
 
-def test_registry_dung_duoc_ca_hai_che_do(tmp_path: Path) -> None:
-    config = Config(runtime_dir=tmp_path)
-    mock = build_provider_set(
-        ProviderSelection(avatar="musetalk"), mode=ProviderMode.MOCK, config=config
+def test_mock_musetalk_van_dung_duoc_cho_nghien_cuu(tmp_path: Path) -> None:
+    """Mock chạy từ D01 — đường nghiên cứu không bị khoá theo."""
+    providers = build_provider_set(
+        ProviderSelection(avatar="musetalk"),
+        mode=ProviderMode.MOCK,
+        config=Config(runtime_dir=tmp_path),
     )
-    real = build_provider_set(
-        ProviderSelection(avatar="musetalk"), mode=ProviderMode.REAL, config=config
-    )
+    assert isinstance(providers.avatar, MockMuseTalkProvider)
 
-    assert isinstance(mock.avatar, MockMuseTalkProvider)
-    assert isinstance(real.avatar, MuseTalkAvatarProvider)
+
+def test_musetalk_that_bi_chan_ngay_o_buoc_CHON(tmp_path: Path) -> None:
+    """Chặn ở registry, không đợi tới ``generate()``.
+
+    Bake-off D04-G kết luận MuseTalk là research candidate. Để nó dựng được rồi
+    mới hỏng lúc render nghĩa là người dùng chỉ biết mình chọn sai **sau khi đã
+    chờ** — mà chờ ở đây là vài phút GPU.
+    """
+    with pytest.raises(ConfigError, match="research candidate"):
+        build_provider_set(
+            ProviderSelection(avatar="musetalk"),
+            mode=ProviderMode.REAL,
+            config=Config(runtime_dir=tmp_path),
+        )
+
+
+def test_thong_diep_chan_chi_ro_duong_di_tiep(tmp_path: Path) -> None:
+    """Lỗi phải nói được: vì sao chặn, tra ở đâu, và làm gì nếu thật sự cần."""
+    with pytest.raises(ConfigError) as exc:
+        build_provider_set(
+            ProviderSelection(avatar="musetalk"),
+            mode=ProviderMode.REAL,
+            config=Config(runtime_dir=tmp_path),
+        )
+    text = str(exc.value)
+    assert "D04G" in text
+    assert "D04G_MUSETALK_BAKEOFF_DESIGN.md" in text
+    assert "--provider-mode mock" in text
+
+
+def test_mo_gate_thi_registry_cho_qua(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hàng rào bám ``gate_is_open``, không phải một cờ cứng nào khác."""
+    monkeypatch.setattr("ai_video_agent.providers.registry.gate_is_open", lambda _g: True)
+    providers = build_provider_set(
+        ProviderSelection(avatar="musetalk"),
+        mode=ProviderMode.REAL,
+        config=Config(runtime_dir=tmp_path),
+    )
+    assert isinstance(providers.avatar, MuseTalkAvatarProvider)
 
 
 def test_adapter_that_chan_khi_gate_dong(
@@ -1107,8 +1144,11 @@ def test_env_ghi_de_duoc_ffmpeg_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Config.from_env().musetalk_ffmpeg_dir == "/opt/ffmpeg/bin"
 
 
-def test_registry_truyen_ffmpeg_dir_xuong_adapter(tmp_path: Path) -> None:
+def test_registry_truyen_ffmpeg_dir_xuong_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Cấu hình phải tới được adapter, không dừng ở Config."""
+    monkeypatch.setattr("ai_video_agent.providers.registry.gate_is_open", lambda _g: True)
     config = Config(runtime_dir=tmp_path, musetalk_ffmpeg_dir="/opt/ffmpeg/bin")
     provider = build_provider_set(
         ProviderSelection(avatar="musetalk"), mode=ProviderMode.REAL, config=config
@@ -1838,7 +1878,10 @@ def test_output_duration_source_di_toi_manifest(
 # --- 6. Không fallback sang Duix ------------------------------------------
 
 
-def test_chon_musetalk_khong_bao_gio_ra_duix(tmp_path: Path) -> None:
+def test_chon_musetalk_khong_bao_gio_ra_duix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ai_video_agent.providers.registry.gate_is_open", lambda _g: True)
     config = Config(runtime_dir=tmp_path)
     for mode in (ProviderMode.MOCK, ProviderMode.REAL):
         chosen = build_provider_set(

@@ -53,6 +53,22 @@ extra riêng chứ không phải phụ thuộc chính.
 
 ---
 
+## Dựng một video
+
+Ba lệnh, chi tiết ở [docs/VAN-HANH.md](docs/VAN-HANH.md):
+
+```powershell
+uv run aiva make --id video-dau-tien --brief "..."          # lập kế hoạch, in việc còn thiếu
+uv run aiva avatar-add "toi-noi.mp4" --project video-dau-tien --owner "Tên bạn"
+uv run aiva voice-add  "giong-toi.wav" --project video-dau-tien --owner "Tên bạn"
+uv run aiva make --id video-dau-tien --brief "..." --by "Tên bạn" --mock   # chạy thử
+uv run aiva make --id video-dau-tien --brief "..." --by "Tên bạn"          # dựng thật
+```
+
+Backend production là **Duix**, chạy local, không tốn tiền API.
+
+---
+
 ## CLI
 
 ```powershell

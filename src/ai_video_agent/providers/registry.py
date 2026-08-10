@@ -7,6 +7,7 @@ nó chưa được duyệt.
 
 from __future__ import annotations
 
+from ai_video_agent import gate_is_open
 from ai_video_agent.config import Config
 from ai_video_agent.domain.enums import ProviderMode
 from ai_video_agent.domain.project import ProviderSelection
@@ -19,6 +20,7 @@ from ai_video_agent.providers.base import (
 )
 from ai_video_agent.providers.duix import DuixAvatarProvider, MockDuixAvatarProvider
 from ai_video_agent.providers.musetalk import MockMuseTalkProvider, MuseTalkAvatarProvider
+from ai_video_agent.providers.musetalk.capability import GATE as MUSETALK_GATE
 from ai_video_agent.providers.musetalk.capability import INSTALL_SUBPATH
 from ai_video_agent.providers.pricing import VIDEO_API_GENERIC, VIMAX_ORCHESTRATED
 from ai_video_agent.providers.video_api import VideoApiBrollProvider
@@ -55,6 +57,19 @@ def _build_avatar(name: str, mode: ProviderMode, config: Config) -> AvatarProvid
     if name == "musetalk":
         if mode is ProviderMode.MOCK:
             return MockMuseTalkProvider()
+        # Chặn ngay ở bước CHỌN, không đợi tới `generate()`. Bake-off D04-G kết
+        # luận MuseTalk là research candidate, không production (trượt khẩu hình
+        # 5/8, độ nét 4,58, VRAM 10.354 MiB). Để nó dựng được rồi mới hỏng lúc
+        # render nghĩa là người dùng chỉ biết mình chọn sai sau khi đã chờ.
+        if not gate_is_open(MUSETALK_GATE):
+            msg = (
+                "MuseTalk là research candidate, KHÔNG dùng cho production "
+                f"(gate {MUSETALK_GATE} đang đóng). Kết luận bake-off D04-G: Duix là "
+                "production winner — xem D04G_MUSETALK_BAKEOFF_DESIGN.md §10. "
+                "Muốn chạy nghiên cứu thì dùng --provider-mode mock, hoặc mở gate "
+                f"{MUSETALK_GATE} trong src/ai_video_agent/__init__.py."
+            )
+            raise ConfigError(msg)
         # Đường cài đặt suy ra từ `runtime_dir`, không ghi cứng vào source. Adapter
         # KHÔNG tự cài và KHÔNG tự tải — thiếu thì nó hỏng với thông điệp rõ.
         return MuseTalkAvatarProvider(
