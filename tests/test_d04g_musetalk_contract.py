@@ -13,6 +13,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 import uuid
 import wave
 from pathlib import Path
@@ -1153,6 +1154,259 @@ def test_file_that_trong_job_dir_van_duoc_nhan(
 
     assert provider.last_job is not None
     assert result.path.resolve().is_relative_to(provider.last_job.result_dir.resolve())
+
+
+# --- B1/LOW-1: đo peak VRAM trong lúc render ------------------------------
+
+
+def _armed_with_vram(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    free_mau: list[int | None] | None = None,
+    total: int | None = 12_282,
+    sampler_no: bool = False,
+) -> MuseTalkAvatarProvider:
+    """Adapter đã qua hàng rào, với bộ lấy mẫu VRAM **giả** hoàn toàn.
+
+    Không test nào ở đây được chạm ``nvidia-smi``: cả sampler lẫn total probe
+    đều tiêm từ ngoài, và khoảng lấy mẫu hạ xuống mức gần như tức thời để test
+    không phải chờ.
+    """
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.080000")
+
+    con_lai = list(free_mau or [])
+
+    def _sampler() -> int | None:
+        if sampler_no:
+            raise RuntimeError("nvidia-smi dang ban")
+        return con_lai.pop(0) if con_lai else (free_mau[-1] if free_mau else None)
+
+    return MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path),
+        vram_sampler=_sampler,
+        vram_total_probe=lambda: total,
+        vram_sample_interval_sec=0.001,
+    )
+
+
+def _cho_lay_mau(provider: MuseTalkAvatarProvider, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub subprocess: ghi output và nán lại đủ để luồng lấy mẫu chạy vài vòng."""
+
+    def _ghi(*_a: object, **_k: object) -> _Completed:
+        assert provider.last_job is not None
+        time.sleep(0.05)
+        (provider.last_job.result_dir / "ket-qua.mp4").write_bytes(b"video gia")
+        return _Completed(0)
+
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _ghi)
+
+
+def test_peak_vram_tinh_tu_total_tru_free_thap_nhat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Đỉnh ĐÃ DÙNG = tổng trừ lượng trống thấp nhất, so được với 9.798 MiB đã đo."""
+    provider = _armed_with_vram(tmp_path, monkeypatch, free_mau=[9_000, 2_484, 5_000])
+    _cho_lay_mau(provider, monkeypatch)
+
+    result = provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    assert provider.last_job is not None
+    assert provider.last_job.peak_vram_mib == 12_282 - 2_484
+    assert result.provenance is not None
+    assert result.provenance.peak_vram_mib == 9_798
+
+
+def test_sampler_tra_none_thi_peak_van_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Không đo được phải giữ nghĩa "chưa đo", không được biến thành 0."""
+    provider = _armed_with_vram(tmp_path, monkeypatch, free_mau=[None])
+    _cho_lay_mau(provider, monkeypatch)
+
+    result = provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    assert provider.last_job is not None
+    assert provider.last_job.peak_vram_mib is None
+    assert result.provenance is not None
+    assert result.provenance.peak_vram_mib is None
+
+
+def test_khong_biet_total_thi_khong_doan_peak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _armed_with_vram(tmp_path, monkeypatch, free_mau=[2_000], total=None)
+    _cho_lay_mau(provider, monkeypatch)
+
+    provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    assert provider.last_job is not None
+    assert provider.last_job.peak_vram_mib is None
+
+
+def test_sampler_nem_loi_thi_render_van_thanh_cong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cổng G3 chỉ GHI NHẬN. Một lượt render 4 phút không được hỏng vì nvidia-smi bận.
+
+    Lưu ý về sức mạnh của test này: luồng nền vốn đã cô lập ngoại lệ, nên nó xanh
+    kể cả khi bỏ ``try/except`` trong vòng lấy mẫu. Nó ghi nhận hợp đồng chứ
+    **không** khoá được nó — test khoá là
+    :func:`test_sampler_loi_tam_thoi_van_tiep_tuc_lay_mau` ngay dưới.
+    """
+    provider = _armed_with_vram(tmp_path, monkeypatch, sampler_no=True)
+    _cho_lay_mau(provider, monkeypatch)
+
+    result = provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    assert result.path.is_file()
+    assert provider.last_job is not None
+    assert provider.last_job.peak_vram_mib is None
+
+
+def test_sampler_loi_tam_thoi_van_tiep_tuc_lay_mau(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Đây mới là thứ ``try/except`` trong vòng lặp thật sự mua được.
+
+    Không có nó, **một** lỗi tạm thời giết luôn luồng lấy mẫu và mọi mẫu sau đó
+    biến mất — lượt render vẫn xong, nhưng đỉnh VRAM thì mất trắng mà không ai
+    biết. Bỏ ``except`` ⇒ test này đỏ.
+    """
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.0")
+    lan = {"n": 0}
+
+    def _hong_lan_dau() -> int | None:
+        lan["n"] += 1
+        if lan["n"] == 1:
+            raise RuntimeError("nvidia-smi ban mot nhip")
+        return 2_484
+
+    provider = MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path),
+        vram_sampler=_hong_lan_dau,
+        vram_total_probe=lambda: 12_282,
+        vram_sample_interval_sec=0.001,
+    )
+    _cho_lay_mau(provider, monkeypatch)
+
+    provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    assert lan["n"] > 1, "vòng lấy mẫu phải sống sót qua lỗi đầu tiên"
+    assert provider.last_job is not None
+    assert provider.last_job.peak_vram_mib == 12_282 - 2_484
+
+
+def test_peak_van_duoc_ghi_khi_job_hong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hỏng vì OOM thì đỉnh VRAM chính là bằng chứng cần nhất — không được mất."""
+    provider = _armed_with_vram(tmp_path, monkeypatch, free_mau=[1_000])
+
+    def _hong(*_a: object, **_k: object) -> _Completed:
+        time.sleep(0.05)
+        return _Completed(1, stderr="CUDA out of memory")
+
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _hong)
+
+    with pytest.raises(ProviderError, match="THẤT BẠI"):
+        provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    assert provider.last_job is not None
+    assert provider.last_job.peak_vram_mib == 12_282 - 1_000
+
+
+def test_peak_vram_chay_toi_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_video_agent.orchestrator.pipeline import Pipeline as _P
+
+    provider = _armed_with_vram(tmp_path, monkeypatch, free_mau=[2_484])
+    _cho_lay_mau(provider, monkeypatch)
+    result = provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    needed = provider.estimate_resources(_request(tmp_path))
+    preflight = check_resources("musetalk", needed, ResourceBudget())
+    record = _P._avatar_provenance_record(
+        provider.info(), provider.capability(), result, result.path, preflight
+    )
+
+    assert record.resources is not None
+    assert record.resources.peak_vram_mib == 9_798
+
+
+def test_mac_dinh_khong_tu_goi_nvidia_smi_trong_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """conftest chặn ``probe_free_vram_mib`` ở CẤP MODULE — adapter phải gọi qua đó.
+
+    Bind thẳng tên hàm lúc import sẽ vô hiệu hoá lớp chặn, và test sẽ âm thầm
+    chạy nvidia-smi thật. Test này canh đúng điều đó.
+    """
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.0")
+    provider = MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path), vram_sample_interval_sec=0.001
+    )
+    _cho_lay_mau(provider, monkeypatch)
+
+    provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    #: conftest cho probe trả None ⇒ không có mẫu ⇒ không hỏi tới total probe.
+    assert provider.last_job is not None
+    assert provider.last_job.peak_vram_mib is None
+
+
+# --- B1/LOW-4: ghi config hỏng phải thành ProviderError -------------------
+
+
+def test_ghi_config_loi_he_thong_thanh_provider_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _armed(tmp_path, monkeypatch)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
+    request = _request(tmp_path)
+
+    def _write_hong(*_a: object, **_k: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_bytes", _write_hong)
+
+    with pytest.raises(ProviderError, match="Không ghi được file cấu hình"):
+        provider.generate(request, tmp_path / "out.mp4")
+
+
+# --- B1/LOW-6: output_duration_source tới được manifest -------------------
+
+
+def test_output_duration_source_di_toi_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ghi ở AvatarProvenance chưa đủ — phải chứng minh nó qua được tầng manifest."""
+    from ai_video_agent.orchestrator.pipeline import Pipeline as _P
+
+    provider = _armed(tmp_path, monkeypatch)
+    _stub_run_ghi_output(provider, monkeypatch)
+
+    def _probe(_bin: str, _clip: Path, entries: str, stream: str | None = "v:0") -> str:
+        return "N/A" if entries == "stream=duration" else "14.080000"
+
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", _probe)
+    result = provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    needed = provider.estimate_resources(_request(tmp_path))
+    preflight = check_resources("musetalk", needed, ResourceBudget())
+    record = _P._avatar_provenance_record(
+        provider.info(), provider.capability(), result, result.path, preflight
+    )
+
+    assert record.params["output_duration_source"] == "container-format"
+    assert record.output_duration_sec == 14.08
 
 
 # --- 6. Không fallback sang Duix ------------------------------------------
