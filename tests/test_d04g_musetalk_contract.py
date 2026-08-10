@@ -384,10 +384,21 @@ def test_thieu_wsl_hong_ro(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         provider.generate(_request(tmp_path), tmp_path / "out.mp4")
 
 
-def _armed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MuseTalkAvatarProvider:
-    """Adapter đã qua hết hàng rào, chỉ còn lớp subprocess do test điều khiển."""
+def _mo_hang_rao_moi_truong(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cho mọi hàng rào môi trường đi qua — gate, PATH host, ffmpeg trong WSL.
+
+    Tách riêng vì nó cũng cần cho các test dựng provider trực tiếp. Đặc biệt
+    ``_wsl_file_is_executable`` **phải** bị thay: mặc định nó gọi ``wsl.exe``,
+    và không test nào được chạm WSL thật.
+    """
     monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
     monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._wsl_file_is_executable", lambda *_a: True)
+
+
+def _armed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MuseTalkAvatarProvider:
+    """Adapter đã qua hết hàng rào, chỉ còn lớp subprocess do test điều khiển."""
+    _mo_hang_rao_moi_truong(monkeypatch)
     return MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
 
 
@@ -1003,6 +1014,101 @@ def test_ffprobe_nem_oserror_thanh_provider_error(
         provider.generate(_request(tmp_path), tmp_path / "out.mp4")
 
 
+# --- BLOCKER-1: đường ffmpeg trong WSL cấu hình được và kiểm trước GPU ----
+
+
+def test_mac_dinh_ffmpeg_dir_van_la_usr_bin(tmp_path: Path) -> None:
+    """Đổi mặc định là đổi hành vi của mọi máy khác — giữ nguyên ``/usr/bin``."""
+    assert Config(runtime_dir=tmp_path).musetalk_ffmpeg_dir == "/usr/bin"
+    assert Config.from_env().musetalk_ffmpeg_dir == "/usr/bin"
+
+
+def test_env_ghi_de_duoc_ffmpeg_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Máy cài ffmpeg bằng pip --user để nó ở ~/.local/bin, không phải /usr/bin."""
+    monkeypatch.setenv("AIVA_MUSETALK_FFMPEG_DIR", "/opt/ffmpeg/bin")
+    assert Config.from_env().musetalk_ffmpeg_dir == "/opt/ffmpeg/bin"
+
+
+def test_registry_truyen_ffmpeg_dir_xuong_adapter(tmp_path: Path) -> None:
+    """Cấu hình phải tới được adapter, không dừng ở Config."""
+    config = Config(runtime_dir=tmp_path, musetalk_ffmpeg_dir="/opt/ffmpeg/bin")
+    provider = build_provider_set(
+        ProviderSelection(avatar="musetalk"), mode=ProviderMode.REAL, config=config
+    ).avatar
+    repo = _fake_install(tmp_path)
+    cmd = provider.build_command(repo / "c.yaml", tmp_path)  # type: ignore[attr-defined]
+    argv = _argv_python(_script_of(cmd))
+
+    assert argv[argv.index("--ffmpeg_path") + 1] == "/opt/ffmpeg/bin"
+
+
+def test_thieu_ffmpeg_trong_wsl_hong_truoc_khi_chay_gpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ffmpeg chỉ dùng ở bước mux CUỐI — sai đường dẫn sẽ hỏng sau khi tốn GPU."""
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._wsl_file_is_executable", lambda *_a: False)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bom)
+    provider = MuseTalkAvatarProvider(install_dir=_fake_install(tmp_path))
+
+    with pytest.raises(ProviderError, match="AIVA_MUSETALK_FFMPEG_DIR"):
+        provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+
+def test_kiem_dung_duong_dan_ffmpeg_da_cau_hinh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phải hỏi đúng ``<ffmpeg_dir>/ffmpeg``, không hỏi một đường bịa."""
+    da_hoi: list[str] = []
+
+    def _spy(_bin: str, _distro: str, path: str) -> bool:
+        da_hoi.append(path)
+        return True
+
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._wsl_file_is_executable", _spy)
+    monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.0")
+    provider = MuseTalkAvatarProvider(
+        install_dir=_fake_install(tmp_path), ffmpeg_dir_wsl="/opt/ffmpeg/bin/"
+    )
+    _stub_run_ghi_output(provider, monkeypatch)
+
+    provider.generate(_request(tmp_path), tmp_path / "out.mp4")
+
+    #: Dấu gạch chéo thừa ở cuối phải được cắt, không thành "//ffmpeg".
+    assert da_hoi == ["/opt/ffmpeg/bin/ffmpeg"]
+
+
+def test_kiem_ffmpeg_khong_chay_ffmpeg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hàng rào chỉ được ``test -x``, tuyệt đối không thực thi ffmpeg."""
+    ghi_lai: list[list[str]] = []
+
+    def _bat_argv(argv: list[str], **_k: object) -> _Completed:
+        ghi_lai.append(argv)
+        return _Completed(0)
+
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _bat_argv)
+    from ai_video_agent.providers.musetalk.adapter import _wsl_file_is_executable
+
+    assert _wsl_file_is_executable("wsl.exe", "Ubuntu", "/opt/bin/ffmpeg") is True
+    assert ghi_lai == [["wsl.exe", "-d", "Ubuntu", "--", "test", "-x", "/opt/bin/ffmpeg"]]
+
+
+def test_kiem_ffmpeg_that_bai_thi_tra_false_chu_khong_no(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Không gọi được WSL cũng là lý do chính đáng để dừng — trả False, không ném."""
+    from ai_video_agent.providers.musetalk.adapter import _wsl_file_is_executable
+
+    def _khong_goi_duoc(*_a: object, **_k: object) -> _Completed:
+        raise OSError(2, "wsl.exe khong ton tai")
+
+    monkeypatch.setattr(f"{ADAPTER_MODULE}.subprocess.run", _khong_goi_duoc)
+    assert _wsl_file_is_executable("wsl.exe", "Ubuntu", "/opt/bin/ffmpeg") is False
+
+
 # --- A2/MEDIUM-5: ưu tiên stream v:0, không lấy container làm chính -------
 
 
@@ -1173,8 +1279,7 @@ def _armed_with_vram(
     đều tiêm từ ngoài, và khoảng lấy mẫu hạ xuống mức gần như tức thời để test
     không phải chờ.
     """
-    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
-    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    _mo_hang_rao_moi_truong(monkeypatch)
     monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.080000")
 
     con_lai = list(free_mau or [])
@@ -1275,8 +1380,7 @@ def test_sampler_loi_tam_thoi_van_tiep_tuc_lay_mau(
     biến mất — lượt render vẫn xong, nhưng đỉnh VRAM thì mất trắng mà không ai
     biết. Bỏ ``except`` ⇒ test này đỏ.
     """
-    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
-    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    _mo_hang_rao_moi_truong(monkeypatch)
     monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.0")
     lan = {"n": 0}
 
@@ -1347,8 +1451,7 @@ def test_mac_dinh_khong_tu_goi_nvidia_smi_trong_test(
     Bind thẳng tên hàm lúc import sẽ vô hiệu hoá lớp chặn, và test sẽ âm thầm
     chạy nvidia-smi thật. Test này canh đúng điều đó.
     """
-    monkeypatch.setattr(f"{ADAPTER_MODULE}.gate_is_open", lambda _g: True)
-    monkeypatch.setattr(f"{ADAPTER_MODULE}.shutil.which", lambda _n: "/usr/bin/wsl.exe")
+    _mo_hang_rao_moi_truong(monkeypatch)
     monkeypatch.setattr(f"{ADAPTER_MODULE}._ffprobe_entries", lambda *_a, **_k: "14.0")
     provider = MuseTalkAvatarProvider(
         install_dir=_fake_install(tmp_path), vram_sample_interval_sec=0.001

@@ -134,6 +134,29 @@ def _probe_total_vram_mib() -> int | None:
     return max(values) if values else None
 
 
+def _wsl_file_is_executable(wsl_bin: str, distro: str, posix_path: str) -> bool:
+    """``test -x <path>`` bên trong WSL. Chỉ hỏi, **không chạy** file đó.
+
+    Truyền argv thẳng cho ``wsl.exe`` nên không qua shell nào — đường dẫn có
+    khoảng trắng cũng không cần quote, và không có bề mặt injection.
+
+    Không phân biệt được "không có file" với "không gọi được WSL": cả hai đều
+    trả ``False``, và ở nơi gọi thì cả hai đều là lý do chính đáng để dừng
+    trước khi tiêu thời gian GPU.
+    """
+    try:
+        completed = subprocess.run(  # noqa: S603 - argv cố định, không shell
+            [wsl_bin, "-d", distro, "--", "test", "-x", posix_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
 class _VramSampler:
     """Lấy mẫu VRAM trống ở luồng nền trong lúc subprocess render chạy.
 
@@ -479,6 +502,20 @@ class MuseTalkAvatarProvider:
                 f"Không thấy {self._ffprobe_bin!r} trên PATH. Cần nó để đo thời lượng "
                 "video đầu ra; thiếu thì kết quả không kiểm chứng được. Dừng trước khi "
                 "chạy GPU thay vì hỏng sau khi đã chạy xong."
+            )
+            raise ProviderError(msg)
+
+        # ffmpeg của MuseTalk nằm TRONG WSL và chỉ được dùng ở bước mux **cuối
+        # cùng**. Sai đường dẫn ⇒ hỏng sau khi GPU đã chạy xong — đúng kịch bản
+        # tệ nhất cho một lượt không được thử lại. Nên hỏi ngay bây giờ.
+        ffmpeg_path = f"{self._ffmpeg_dir_wsl.rstrip('/')}/ffmpeg"
+        if not _wsl_file_is_executable(self._wsl_bin, self._wsl_distro, ffmpeg_path):
+            msg = (
+                f"Không thấy ffmpeg chạy được tại {ffmpeg_path!r} trong WSL "
+                f"{self._wsl_distro!r}. MuseTalk nhận thư mục này qua --ffmpeg_path và "
+                "chỉ dùng nó ở bước ghép cuối, nên sai đường dẫn sẽ hỏng SAU khi đã tốn "
+                "hết thời gian GPU. Khai AIVA_MUSETALK_FFMPEG_DIR trỏ đúng thư mục "
+                "chứa ffmpeg (adapter không tự cài)."
             )
             raise ProviderError(msg)
 

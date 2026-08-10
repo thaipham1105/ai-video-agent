@@ -105,6 +105,15 @@ class Config:
     ram_budget_mib: int | None = None
     storage_budget_mib: int | None = None
 
+    #: Thư mục chứa ``ffmpeg`` **bên trong WSL**, truyền cho MuseTalk qua
+    #: ``--ffmpeg_path``. Khác hẳn ``ffmpeg_bin`` (chạy trên host Windows).
+    #:
+    #: Mặc định ``/usr/bin`` là nơi ``apt`` cài. Máy nào cài bằng cách khác —
+    #: ví dụ ``pip install --user`` bỏ nó ở ``~/.local/bin`` — thì phải khai
+    #: ``AIVA_MUSETALK_FFMPEG_DIR``. Sai đường dẫn này chỉ lộ ra ở bước mux
+    #: **cuối cùng**, tức sau khi đã tốn hết thời gian GPU.
+    musetalk_ffmpeg_dir: str = "/usr/bin"
+
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
 
@@ -138,6 +147,7 @@ class Config:
             vram_budget_mib=_env_int_or_none("AIVA_VRAM_BUDGET_MIB"),
             ram_budget_mib=_env_int_or_none("AIVA_RAM_BUDGET_MIB"),
             storage_budget_mib=_env_int_or_none("AIVA_STORAGE_BUDGET_MIB"),
+            musetalk_ffmpeg_dir=_env_str("AIVA_MUSETALK_FFMPEG_DIR", "/usr/bin"),
             ffmpeg_bin=_env_str("AIVA_FFMPEG_BIN", "ffmpeg"),
             ffprobe_bin=_env_str("AIVA_FFPROBE_BIN", "ffprobe"),
             video_api_provider=_env_str("AIVA_VIDEO_API_PROVIDER", "none"),

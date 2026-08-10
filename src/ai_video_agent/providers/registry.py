@@ -63,6 +63,9 @@ def _build_avatar(name: str, mode: ProviderMode, config: Config) -> AvatarProvid
             #: Đo thời lượng video ĐẦU RA trên host. Dùng đúng binary mà phần còn
             #: lại của dự án dùng, thay vì giả định `ffprobe` có trên PATH.
             ffprobe_bin=config.ffprobe_bin,
+            #: Thư mục ffmpeg **trong WSL** cho MuseTalk. Khác `ffprobe_bin` ở trên
+            #: (chạy trên host) — hai môi trường khác nhau, không gộp được.
+            ffmpeg_dir_wsl=config.musetalk_ffmpeg_dir,
         )
 
     if mode is ProviderMode.MOCK:
