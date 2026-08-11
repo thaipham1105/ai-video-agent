@@ -90,6 +90,28 @@ def _kiem_tra_van_hanh() -> bool:
     return True
 
 
+def _yeu_cau_da_doi(
+    project: Project, brief: str, duration: float, aspect: str, fps: int
+) -> bool:
+    """Yêu cầu lần này có khác lần trước không — quyết định có lập lại kịch bản.
+
+    Vì sao cần: ``make`` vốn dùng lại kịch bản cũ khi project đã tồn tại, để
+    "chạy lại đúng lệnh cũ sau khi bổ sung tài sản" đi tiếp được. Nhưng sửa nội
+    dung rồi chạy lại **cùng ID** thì nó cũng dùng lại kịch bản cũ và dựng ra
+    video mang nội dung cũ, trong khi vẫn báo thành công. D06-B bắt được đúng
+    trường hợp này: brief đổi hẳn, video ra vẫn là 6 cảnh của bản trước.
+
+    So bốn thứ định hình kịch bản. Đổi ngân sách hay nhãn AI thì không cần lập
+    lại — chúng không đụng tới cách chia cảnh.
+    """
+    return (
+        project.brief_vi.strip() != brief.strip()
+        or abs(project.target_duration_sec - duration) > 1e-6
+        or project.aspect_ratio.value != aspect
+        or project.fps != fps
+    )
+
+
 def _print_warnings(warnings: list[str]) -> None:
     """In cảnh báo của manifest, **giữ nguyên từng ký tự** của nội dung.
 
@@ -762,6 +784,10 @@ def make(
 
     if not repo.exists(project_id):
         console.print("[bold]1/4[/bold] Lập kế hoạch…")
+        plan(brief=brief, title="", project_id=project_id, duration=duration,
+             aspect=aspect, fps=fps, budget=0.0, ai_label=True)
+    elif _yeu_cau_da_doi(repo.load_project(project_id), brief, duration, aspect, fps):
+        console.print("[bold]1/4[/bold] Nội dung đã đổi — lập lại kịch bản…")
         plan(brief=brief, title="", project_id=project_id, duration=duration,
              aspect=aspect, fps=fps, budget=0.0, ai_label=True)
     else:

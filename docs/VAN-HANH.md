@@ -15,8 +15,24 @@ Không tốn tiền API. MuseTalk là ứng viên nghiên cứu và **không ch�
 |---|---|
 | **Video người đại diện** | MP4, người nói vào camera, **≥ 5 giây**. Đúng tỷ lệ khung hình của video định làm (9:16 thì quay dọc). Duix là mô hình face2face — **ảnh tĩnh không dùng được**. |
 | **Mẫu giọng** | WAV/MP3/FLAC…, **8–30 giây**, đọc rõ, ít ồn, không clipping. |
-| **Nội dung** | Một đoạn tiếng Việt mô tả điều muốn nói. |
+| **Nội dung** | Một đoạn tiếng Việt mô tả điều muốn nói. Xem bảng quy đổi bên dưới. |
 | **Quyền sử dụng** | Chỉ dùng hình/giọng của chính mình hoặc đã có đồng ý rõ ràng. |
+
+### Viết bao nhiêu chữ cho đủ thời lượng
+
+`--duration` là **mục tiêu**, không phải cam kết: nó chỉ hướng dẫn cách chia
+cảnh. Thời lượng thật do giọng đọc quyết định — VieNeu đọc ~2,9 giây mỗi câu,
+nhanh hơn ước lượng của trình lập kế hoạch. Số đo thật ở
+[D06_ACCEPTANCE.md](../D06_ACCEPTANCE.md):
+
+| Muốn video | Viết khoảng |
+|---|---|
+| 30 giây | 12 câu |
+| 60 giây | 24 câu |
+| 90 giây | 36 câu |
+
+Thiếu chữ thì video ngắn hơn mong đợi, không phải lỗi. Xem thời lượng thật ở
+`report.html` sau khi dựng xong.
 
 Kiểm máy trước lần đầu:
 

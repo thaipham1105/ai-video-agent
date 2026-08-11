@@ -28,6 +28,7 @@ VieNeu-TTS, Duix-Avatar hay ViMax — ba upstream đó được giữ tách bi�
 | D03 | Duix-Avatar thật | ✅ HOÀN THÀNH — [D03_PREFLIGHT.md](D03_PREFLIGHT.md) |
 | D04 | Composer FFmpeg + video hoàn chỉnh | ✅ HOÀN THÀNH |
 | D05 | ViMax / Video API tuỳ chọn | ⏸ **cố ý không mở** — tuỳ chọn, gọi API tính tiền |
+| D06 | Giao diện local + nghiệm thu render dài | ✅ HOÀN THÀNH — [D06_ACCEPTANCE.md](D06_ACCEPTANCE.md) |
 
 Tổng kết: [FINAL_PROJECT_REPORT.md](FINAL_PROJECT_REPORT.md)
 

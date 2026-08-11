@@ -112,6 +112,48 @@ def test_make_dung_lai_va_chi_ro_tai_san_con_thieu(
     assert PROJECT in ket_qua.output
 
 
+def test_make_lap_lai_kich_ban_khi_noi_dung_doi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tao_du_tai_san: None
+) -> None:
+    """Sửa nội dung rồi chạy lại cùng ID phải ra kịch bản MỚI.
+
+    D06-B bắt được: ``make`` dùng lại kịch bản cũ cho project đã tồn tại, nên
+    brief đổi hẳn mà video ra vẫn mang nội dung cũ — và vẫn báo thành công. Một
+    công cụ dựng video mà âm thầm bỏ qua nội dung bạn vừa sửa là công cụ hỏng.
+    """
+    del tao_du_tai_san
+    moi = (
+        "Căn hộ hai phòng ngủ tại quận Bình Thạnh. Ban công hướng đông nam. "
+        "Giá hai tỷ tám, có thương lượng. Liên hệ 0912345678 để xem nhà."
+    )
+
+    ket_qua = runner.invoke(app, ["make", "--id", PROJECT, "--brief", moi, "--duration", "30"])
+
+    assert ket_qua.exit_code == 0, ket_qua.output
+    assert "lập lại kịch bản" in ket_qua.output
+    duong = tmp_path / "projects" / PROJECT
+    assert "Bình Thạnh" in json.loads(duong.joinpath("project.json").read_text("utf-8"))["brief_vi"]
+    assert "Bình Thạnh" in duong.joinpath("storyboard.json").read_text("utf-8")
+
+
+def test_make_giu_kich_ban_khi_noi_dung_khong_doi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tao_du_tai_san: None
+) -> None:
+    """Chạy lại đúng lệnh cũ thì **không** được lập lại — đó là đường resume.
+
+    Lập lại mỗi lần sẽ đổi hash storyboard, làm phê duyệt cũ hết hiệu lực và
+    huỷ cache của mọi shot, biến "bổ sung tài sản rồi chạy tiếp" thành "dựng
+    lại từ đầu".
+    """
+    del tao_du_tai_san
+    truoc = (tmp_path / "projects" / PROJECT / "storyboard.json").read_text("utf-8")
+
+    ket_qua = runner.invoke(app, ["make", "--id", PROJECT, "--brief", BRIEF, "--duration", "30"])
+
+    assert "dùng lại kịch bản hiện tại" in ket_qua.output
+    assert (tmp_path / "projects" / PROJECT / "storyboard.json").read_text("utf-8") == truoc
+
+
 def test_make_khong_tu_duyet_kich_ban(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tao_du_tai_san: None
 ) -> None:

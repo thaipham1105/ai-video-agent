@@ -224,6 +224,34 @@ def test_job_xong_roi_thi_nhan_job_moi() -> None:
     assert trang_thai.id
 
 
+def test_job_tra_ok_false_thi_bao_that_bai_chu_khong_bao_xanh() -> None:
+    """"Hàm chạy xong" không đồng nghĩa "việc đã xong".
+
+    Lượt ``09fb9c1e14d3`` của D06-B: TTS hỏng, manifest ``failed``, nhưng job
+    vẫn hiện ``succeeded`` vì hàm trả về bình thường. Người dùng đi tìm một file
+    MP4 không tồn tại. Giao diện nói dối về kết quả là lỗi nặng hơn cả lỗi render.
+    """
+    runner = JobRunner()
+    runner.start("render", lambda: {"ok": False, "status": "failed", "message": "TTS hỏng"})
+    runner.join(timeout=5)
+
+    hien = runner.current()
+    assert hien is not None
+    assert hien.status == "failed"
+    assert "TTS hỏng" in hien.message
+
+
+def test_job_khong_khai_ok_thi_coi_nhu_thanh_cong() -> None:
+    """Job không phải render (ví dụ tác vụ phụ) không bắt buộc khai ``ok``."""
+    runner = JobRunner()
+    runner.start("khac", lambda: {"message": "xong"})
+    runner.join(timeout=5)
+
+    hien = runner.current()
+    assert hien is not None
+    assert hien.status == "succeeded"
+
+
 def test_job_hong_thanh_trang_thai_chu_khong_giet_luong() -> None:
     """Một lượt render hỏng không được làm sập server."""
     runner = JobRunner()
@@ -308,6 +336,43 @@ def test_route_render_thu_hai_tra_409(
     finally:
         cho.set()
         runner.join(timeout=5)
+
+
+def test_ten_tieng_viet_di_qua_form_khong_bi_hong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tên có dấu phải tới service **nguyên vẹn từng ký tự**.
+
+    ``consent.owner`` và ``approval.approved_by`` là bản ghi đạo đức, không phải
+    chữ trang trí: chúng ghi lại ai đã cho phép dùng hình và giọng của mình. Một
+    chữ hỏng ở đó là hỏng chính bằng chứng đồng ý.
+
+    D06-B từng thấy ``"Ph?m Van Th\\ufffdi"`` nằm trong ``project.json`` — hoá ra
+    do codepage của terminal gọi ``curl``, không phải do đường HTTP. Test này neo
+    lại điều đó để lần sau không phải đoán.
+    """
+    from ai_video_agent.webui.app import create_app
+
+    monkeypatch.setenv("AIVA_RUNTIME_DIR", str(tmp_path))
+    ten = "Phạm Văn Thái"
+    goi: dict[str, Any] = {}
+    monkeypatch.setattr(cli_main, "make", lambda **kw: goi.update(kw))
+
+    khach = TestClient(create_app(Config(runtime_dir=tmp_path)))
+    r = khach.post(
+        "/api/render",
+        data={"project_id": "du-an-test", "brief": BRIEF, "by": ten, "mock": "true"},
+    )
+    assert r.status_code == 200
+
+    for _ in range(50):
+        if goi:
+            break
+        import time as _t
+
+        _t.sleep(0.05)
+
+    assert goi["by"] == ten, "tên có dấu phải qua form HTTP nguyên vẹn"
 
 
 def test_route_mo_thu_muc_chan_duong_dan_ngoai_runtime(client: TestClient) -> None:

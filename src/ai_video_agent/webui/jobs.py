@@ -102,10 +102,18 @@ class JobRunner:
                 state.finished_at = now_utc()
             return
         with self._lock:
-            state.status = "succeeded"
+            #: "Hàm chạy xong" **không** đồng nghĩa "việc đã xong". ``run_make``
+            #: trả ``ok=False`` khi lượt render thất bại — nếu vẫn báo
+            #: ``succeeded`` thì giao diện nói dối về kết quả, và người dùng đi
+            #: tìm một file MP4 không tồn tại. Lượt ``09fb9c1e14d3`` của D06-B là
+            #: bằng chứng: TTS hỏng, manifest ``failed``, job vẫn xanh.
+            thanh_cong = bool(ket_qua.get("ok", True))
+            state.status = "succeeded" if thanh_cong else "failed"
             state.result = ket_qua
             state.log = str(ket_qua.pop("log", "") or state.log)
-            state.message = str(ket_qua.get("message", "") or "Xong.")
+            state.message = str(
+                ket_qua.get("message", "") or ("Xong." if thanh_cong else "Lượt dựng thất bại.")
+            )
             state.finished_at = now_utc()
 
     def current(self) -> JobState | None:
