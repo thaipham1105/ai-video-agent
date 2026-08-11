@@ -497,7 +497,7 @@ def test_pipeline_chan_render_khi_khong_du_vram(
     tmp_path: Path,
     clock: object,
 ) -> None:
-    """Backend đòi 7 GB, máy khai còn 2 GB — phải chết trước khi gọi generate()."""
+    """Backend đòi 8,5 GB, máy khai còn 2 GB — phải chết trước khi gọi generate()."""
     from ai_video_agent.composer.runner import MockComposer
     from ai_video_agent.domain.enums import ProviderMode
     from ai_video_agent.domain.project import ProviderSelection
@@ -527,7 +527,7 @@ def test_pipeline_chan_render_khi_khong_du_vram(
     )
     _approve(project, storyboard, repo)
 
-    with pytest.raises(CapabilityError, match="7004"):
+    with pytest.raises(CapabilityError, match=str(DUIX_RESOURCES.vram_mib)):
         pipeline.render(project, storyboard, granted_assets, RenderOptions(dry_run=False))
 
 

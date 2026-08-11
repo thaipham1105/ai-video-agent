@@ -12,17 +12,30 @@ from __future__ import annotations
 
 from ai_video_agent.providers.base import AvatarCapability, ResourceEstimate
 
-#: Đo ở bake-off D04: peak 7.004 MiB cho clip 7,6 s ở 1080x1920.
+#: **8.500 MiB là ngưỡng bảo thủ, không phải một số đo thô.** Lịch sử hai lần đo:
+#:
+#: * bake-off D04 (2026-08-05): peak 7.004 MiB cho clip 7,6 s ở 1080x1920;
+#: * smoke D05-B (2026-08-11), run ``2b11f490b425``: lấy mẫu ``nvidia-smi`` mỗi
+#:   giây trong lúc chạy cho đỉnh 11.716 MiB tổng, trừ nền 3.685 MiB lúc
+#:   container mới lên ⇒ Duix chiếm **~8.031 MiB**.
+#:
+#: Số cũ thấp hơn thực tế hơn 1 GB, nghĩa là preflight sẽ cho qua những lượt
+#: chạy rồi mới OOM — mà OOM giữa chừng đắt hơn nhiều so với bị chặn trước.
+#: Lấy 8.500 = đỉnh quan sát + biên ~6%, vì hai lần đo cách nhau 1 GB thì con số
+#: thứ ba nhiều khả năng không nằm gọn trong khoảng đã thấy.
+#:
 #: RAM và đĩa lấy theo quan sát container Duix (image 4,66 GB + dữ liệu tạm).
 DUIX_RESOURCES = ResourceEstimate(
-    vram_mib=7_004,
+    vram_mib=8_500,
     ram_mib=4_096,
     storage_mib=5_120,
     #: Duix sinh tất định trên cùng đầu vào — A và C của bake-off trùng nhau
     #: từng byte khi chỉ đổi tham số vô hiệu.
     deterministic_local=True,
+    #: Vẫn là ``True``: neo vào phép đo trên chính máy này, không chép tài liệu
+    #: upstream. Phần cộng thêm là biên an toàn, đã nói rõ ở khối trên.
     measured=True,
-    measured_on="2026-08-05",
+    measured_on="2026-08-11",
 )
 
 DUIX_CAPABILITY = AvatarCapability(

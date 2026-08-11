@@ -262,7 +262,7 @@ def test_dry_run_thieu_vram_bi_chan_ngay(
         pipeline.render(project, storyboard, empty_assets)
 
     text = str(exc.value)
-    assert "7004" in text and "2048" in text
+    assert str(DUIX_RESOURCES.vram_mib) in text and "2048" in text
 
 
 def test_dry_run_khong_cham_provider_du_da_chay_preflight(

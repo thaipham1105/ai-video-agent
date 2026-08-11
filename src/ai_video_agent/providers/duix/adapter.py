@@ -59,6 +59,7 @@ from ai_video_agent.providers.base import (
     fingerprint_file,
 )
 from ai_video_agent.providers.duix.capability import DUIX_CAPABILITY, DUIX_RESOURCES
+from ai_video_agent.providers.media_probe import probe_video_fps
 from ai_video_agent.providers.pricing import DUIX_LOCAL
 
 GATE = "D03"
@@ -127,6 +128,7 @@ class DuixAvatarProvider:
         #: Thư mục kết quả của container, nhìn từ host.
         result_dir_host: Path | None = None,
         poll_interval_sec: float = POLL_INTERVAL_SEC,
+        ffprobe_bin: str = "ffprobe",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout_sec = timeout_sec
@@ -135,6 +137,7 @@ class DuixAvatarProvider:
         self._path_map = path_map
         self._result_dir_host = result_dir_host
         self._poll_interval_sec = poll_interval_sec
+        self._ffprobe_bin = ffprobe_bin
         #: Nhật ký lần chạy gần nhất, để pipeline/báo cáo đọc lại.
         self.last_job: DuixJob | None = None
 
@@ -308,6 +311,9 @@ class DuixAvatarProvider:
         self._assert_avatar_source(request)
         assert request.avatar_source is not None  # noqa: S101 - đã kiểm tra ở trên
         check_avatar_request(self.capability(), request, source_is_image=False)
+        #: Đo fps nguồn **trước khi** gửi job: nếu thiếu ffprobe thì hỏng ở đây,
+        #: mất một giây — chứ không phải sau khi GPU đã chạy xong.
+        source_fps, _ = probe_video_fps(self._ffprobe_bin, request.avatar_source)
 
         started = time.monotonic()
         job = self.submit(
@@ -319,19 +325,28 @@ class DuixAvatarProvider:
         elapsed = time.monotonic() - started
 
         produced = self._resolve_result(job)
+        #: fps ĐẦU RA đo từ file Duix vừa sinh, không lấy ``request.fps``. Duix
+        #: chuẩn hoá video nguồn rồi giữ nguyên fps của nó, nên yêu cầu 30 với
+        #: nguồn 25 vẫn ra 25 — lượt ``2b11f490b425`` của D05-B là bằng chứng.
+        output_fps, _ = probe_video_fps(self._ffprobe_bin, produced)
         return AvatarResult(
             path=produced,
             duration_sec=self.duration_seconds(job) or read_wav_duration(request.audio_path),
             width=int(job.width or request.width),
             height=int(job.height or request.height),
-            fps=request.fps,
+            fps=output_fps,
             is_placeholder=False,
             actual_cost_usd=0.0,
-            provenance=self._provenance(request, job, elapsed),
+            provenance=self._provenance(request, job, elapsed, source_fps=source_fps),
         )
 
     def _provenance(
-        self, request: AvatarRequest, job: DuixJob, render_seconds: float
+        self,
+        request: AvatarRequest,
+        job: DuixJob,
+        render_seconds: float,
+        *,
+        source_fps: int,
     ) -> AvatarProvenance:
         """Dấu vết đủ để truy ngược video này về model và đầu vào đã sinh ra nó."""
         cap = self.capability()
@@ -341,7 +356,7 @@ class DuixAvatarProvider:
             model=self._model,
             model_version=self._image_digest or "unpinned",
             audio_encoder=cap.audio_encoder,
-            source_fps=request.fps,
+            source_fps=source_fps,
             audio_sha256=fingerprint_file(request.audio_path),
             source_asset_sha256=fingerprint_file(request.avatar_source),
             #: Trọng số nằm trong Docker image, không có file checkpoint rời.

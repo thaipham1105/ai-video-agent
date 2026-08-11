@@ -99,6 +99,7 @@ def _build_avatar(name: str, mode: ProviderMode, config: Config) -> AvatarProvid
         image_digest=config.duix_image_digest,
         path_map=((str(config.runtime_dir / "projects"), config.duix_inputs_mount),),
         result_dir_host=config.duix_data_dir,
+        ffprobe_bin=config.ffprobe_bin,
     )
 
 

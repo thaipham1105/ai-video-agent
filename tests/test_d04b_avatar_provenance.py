@@ -19,7 +19,7 @@ from ai_video_agent.domain.assets import AssetManifest, sha256_file
 from ai_video_agent.domain.enums import ProjectState, RenderStage, StageStatus
 from ai_video_agent.domain.project import Approval, Project
 from ai_video_agent.domain.storyboard import Storyboard
-from ai_video_agent.errors import CapabilityError, ConsentMissingError
+from ai_video_agent.errors import CapabilityError, ConsentMissingError, ProviderError
 from ai_video_agent.orchestrator.pipeline import Pipeline, RenderOptions
 from ai_video_agent.orchestrator.repository import ProjectRepository
 from ai_video_agent.providers.avatar_capability import (
@@ -34,6 +34,7 @@ from ai_video_agent.providers.base import (
     ResourceEstimate,
 )
 from ai_video_agent.providers.duix import DuixAvatarProvider, MockDuixAvatarProvider
+from ai_video_agent.providers.duix.adapter import DuixJob
 from ai_video_agent.providers.duix.capability import DUIX_CAPABILITY, DUIX_RESOURCES
 
 
@@ -205,12 +206,22 @@ def test_adapter_that_chan_kich_thuoc_vuot_tran_truoc_khi_goi_http(tmp_path: Pat
         )
 
 
-def test_bom_that_su_no_khi_khong_con_hang_rao(tmp_path: Path) -> None:
+def test_bom_that_su_no_khi_khong_con_hang_rao(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Kiểm tra chính cái bẫy: yêu cầu HỢP LỆ phải đi tới lớp HTTP.
 
     Không có test này thì hai test trên có thể xanh vì adapter chết sớm ở một
     hàng rào khác, và ta sẽ tưởng đã chứng minh được thứ tự.
+
+    Phải giả lập ffprobe: ``avatar.mp4`` ở đây là vài byte đánh dấu, không phải
+    video thật, mà adapter nay **đo fps nguồn trước khi gửi job**. Không giả lập
+    thì test đỏ vì ffprobe, tức là đo nhầm thứ — nó nói về thứ tự hàng rào.
     """
+    monkeypatch.setattr(
+        "ai_video_agent.providers.media_probe._ffprobe_entries",
+        lambda *_a, **_k: "25/1",
+    )
     with pytest.raises(AssertionError, match="sai thứ tự"):
         _armed_provider(tmp_path).generate(_request(tmp_path), tmp_path / "out.mp4")
 
@@ -223,6 +234,82 @@ def test_thieu_tai_san_avatar_chan_som_hon_ca_kiem_nang_luc(tmp_path: Path) -> N
 
     with pytest.raises(ConsentMissingError):
         provider.generate(request, tmp_path / "out.mp4")
+
+
+# --- fps trong provenance: đo từ file, không lặp lại yêu cầu --------------
+
+
+def _duix_da_gia_lap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, source_fps: str, output_fps: str
+) -> DuixAvatarProvider:
+    """Adapter Duix với HTTP và ffprobe đã giả lập, mọi thứ khác giữ nguyên.
+
+    ffprobe trả fps **khác nhau** cho nguồn và cho file sinh ra, vì đó chính là
+    tình huống mà lượt ``2b11f490b425`` gặp: nguồn 25, cấu hình đòi 30.
+    """
+    produced = tmp_path / "ket-qua.mp4"
+    produced.write_bytes(b"ket qua duix")
+
+    def _probe(_bin: str, path: Path, entries: str, stream: str | None = "v:0") -> str:
+        del entries, stream
+        return output_fps if path == produced else source_fps
+
+    monkeypatch.setattr("ai_video_agent.providers.media_probe._ffprobe_entries", _probe)
+
+    provider = DuixAvatarProvider(path_map=((str(tmp_path), "/inputs"),))
+    job = DuixJob(code="aiva-test", submitted_at=0.0, payload={}, video_duration=1000)
+    monkeypatch.setattr(provider, "submit", lambda **_k: job)
+    monkeypatch.setattr(provider, "wait", lambda _job: None)
+    monkeypatch.setattr(provider, "_resolve_result", lambda _job: produced)
+    return provider
+
+
+def test_duix_source_fps_do_tu_video_nguon_chu_khong_lay_tu_yeu_cau(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nguồn 25 fps mà yêu cầu 30 thì provenance phải ghi **25**.
+
+    Đây đúng là lỗi lượt ``2b11f490b425`` của D05-B: manifest khai 30 cho cả
+    ``source_fps`` lẫn ``output_fps`` vì đọc từ cấu hình, trong khi file nguồn
+    và file sinh ra đều là 25/1. Một manifest khai sai số như thế làm hỏng mọi
+    kết luận về sau — D04-G đã phải huỷ nguyên một lượt vì đúng cái bẫy này.
+    """
+    provider = _duix_da_gia_lap(tmp_path, monkeypatch, source_fps="25/1", output_fps="25/1")
+
+    result = provider.generate(_request(tmp_path, fps=30), tmp_path / "out.mp4")
+
+    assert result.provenance is not None
+    assert result.provenance.source_fps == 25, "source_fps phải là fps của FILE, không phải yêu cầu"
+    assert result.fps == 25, "output_fps phải đo từ file Duix sinh ra"
+
+
+def test_duix_output_fps_khac_source_fps_van_ghi_dung_ca_hai(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hai số là hai phép đo độc lập — gộp một là mất khả năng phát hiện lệch."""
+    provider = _duix_da_gia_lap(tmp_path, monkeypatch, source_fps="25/1", output_fps="30/1")
+
+    result = provider.generate(_request(tmp_path, fps=30), tmp_path / "out.mp4")
+
+    assert result.provenance is not None
+    assert result.provenance.source_fps == 25
+    assert result.fps == 30
+
+
+def test_duix_do_fps_nguon_truoc_khi_gui_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nguồn không đọc được fps thì hỏng **trước** GPU, không phải sau.
+
+    Gài bom ở lớp HTTP: hỏng sau khi gửi job nghĩa là đã tiêu thời gian GPU rồi
+    mới phát hiện, đúng thứ mà hàng rào này sinh ra để tránh.
+    """
+    monkeypatch.setattr(
+        "ai_video_agent.providers.media_probe._ffprobe_entries", lambda *_a, **_k: ""
+    )
+
+    with pytest.raises(ProviderError, match="Không đọc được fps"):
+        _armed_provider(tmp_path).generate(_request(tmp_path), tmp_path / "out.mp4")
 
 
 # --- Cảnh báo ngôn ngữ: nói ra, không chặn --------------------------------
@@ -313,11 +400,17 @@ def test_duix_giu_nguyen_danh_tinh_va_gia() -> None:
     assert info.billable is False
 
 
-def test_capability_duix_khop_so_da_do_o_bakeoff() -> None:
-    """7.004 MiB là số đo thật ở bake-off D04, không phải chép tài liệu."""
-    assert DUIX_RESOURCES.vram_mib == 7_004
+def test_capability_duix_khop_so_da_do_tren_may_nay() -> None:
+    """Ngưỡng VRAM neo vào phép đo trên máy này, không chép tài liệu upstream.
+
+    8.500 MiB thay cho 7.004 MiB cũ: smoke D05-B (run ``2b11f490b425``) lấy mẫu
+    trong lúc chạy và thấy Duix chiếm ~8.031 MiB — số cũ thấp hơn thực tế hơn
+    1 GB, đủ để preflight cho qua một lượt rồi mới OOM.
+    """
+    assert DUIX_RESOURCES.vram_mib == 8_500
+    assert DUIX_RESOURCES.vram_mib > 8_031, "phải phủ được đỉnh đã quan sát ở D05-B"
     assert DUIX_RESOURCES.measured is True
-    assert DUIX_RESOURCES.measured_on == "2026-08-05"
+    assert DUIX_RESOURCES.measured_on == "2026-08-11"
     assert DUIX_CAPABILITY.audio_encoder == "wenet-aishell"
     assert DUIX_CAPABILITY.languages_verified == frozenset({"zh"})
     assert DUIX_CAPABILITY.native_fps == 30

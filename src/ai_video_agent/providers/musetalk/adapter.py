@@ -61,6 +61,10 @@ from ai_video_agent.providers.base import (
     ResourceEstimate,
     fingerprint_file,
 )
+
+#: Đo fps/thời lượng bằng bản dùng chung: Duix mắc đúng cái bẫy fps mà lượt
+#: ``f16bd2a245d4`` đã lộ ra ở đây, nên một bản cho cả hai adapter.
+from ai_video_agent.providers.media_probe import probe_entries, probe_video_fps
 from ai_video_agent.providers.musetalk.capability import (
     GATE,
     MUSETALK_CAPABILITY,
@@ -70,12 +74,6 @@ from ai_video_agent.providers.musetalk.capability import (
     REQUIRED_WEIGHTS,
     UNET_SHA256,
 )
-
-#: Wrapper ffprobe **đã có sẵn** của repo. Dùng lại thay vì viết bản thứ hai —
-#: hai wrapper là hai chỗ để sai lệch khác nhau. Đây là ngoại lệ layering duy
-#: nhất của module này (``providers`` -> ``qc``); nếu về sau còn nơi khác cần,
-#: hãy nâng ``_probe`` thành API công khai thay vì nhân bản nó.
-from ai_video_agent.qc.broll import _probe as _ffprobe_entries
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -807,20 +805,8 @@ class MuseTalkAvatarProvider:
         return produced
 
     def _probe_entries(self, produced: Path, entries: str, stream: str | None) -> str:
-        """Gọi wrapper ffprobe và biến **mọi** lỗi thành ``ProviderError``.
-
-        ``qc.broll._run`` không bắt ``OSError``, nên thiếu binary ffprobe sẽ ném
-        ``FileNotFoundError`` xuyên thẳng ra ngoài. Hợp đồng đòi lỗi provider là
-        ``ProviderError``; để OSError thô lọt ra là buộc người đọc log tự lần.
-        """
-        try:
-            return _ffprobe_entries(self._ffprobe_bin, produced, entries, stream=stream)
-        except OSError as exc:
-            msg = (
-                f"Không chạy được {self._ffprobe_bin!r} để đo {produced}: {exc}. "
-                "Adapter không tự cài công cụ."
-            )
-            raise ProviderError(msg) from exc
+        """Gọi wrapper ffprobe và biến **mọi** lỗi thành ``ProviderError``."""
+        return probe_entries(self._ffprobe_bin, produced, entries, stream)
 
     def _probe_video_duration(self, produced: Path) -> tuple[float, str]:
         """Thời lượng MP4 đầu ra, **ưu tiên stream video** ``v:0``.
@@ -870,25 +856,8 @@ class MuseTalkAvatarProvider:
         định fps đầu ra khi đầu vào là video** — nó lấy fps của video nguồn. Lượt
         ``f16bd2a245d4`` đã lộ ra điều đó: truyền ``--fps 25`` nhưng file sinh ra
         là 30/1, trong khi manifest vẫn khai 25 vì đọc từ cấu hình.
-
-        Giữ cả tỷ số thô (``30000/1001``) vì làm tròn về int là mất thông tin, mà
-        schema manifest lại chỉ nhận int.
         """
-        raw = self._probe_entries(path, "stream=r_frame_rate", "v:0").strip()
-        first = raw.splitlines()[0].strip() if raw else ""
-        if "/" not in first:
-            msg = f"Không đọc được fps từ {path} (ffprobe trả {raw!r})."
-            raise ProviderError(msg)
-        num, den = first.split("/", 1)
-        try:
-            value = float(num) / float(den)
-        except (ValueError, ZeroDivisionError) as exc:
-            msg = f"fps không hợp lệ từ {path}: {first!r}."
-            raise ProviderError(msg) from exc
-        if not math.isfinite(value) or value <= 0:
-            msg = f"fps không hợp lệ từ {path}: {value!r}."
-            raise ProviderError(msg)
-        return round(value), first
+        return probe_video_fps(self._ffprobe_bin, path)
 
     def _assert_source_fps_matches(self, request: AvatarRequest) -> None:
         """fps yêu cầu phải **khớp fps của video nguồn**, kiểm trước khi chạm GPU.
