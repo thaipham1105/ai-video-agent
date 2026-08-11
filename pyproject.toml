@@ -85,6 +85,12 @@ ignore = ["ANN401"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "ANN", "PTH"]
 
+[tool.ruff.lint.flake8-bugbear]
+# B008 cấm gọi hàm trong giá trị mặc định của tham số — đúng cho hầu hết trường
+# hợp, nhưng `Form(...)`/`File(...)` của FastAPI CHÍNH LÀ cách khai báo tham số
+# request. Đây là ngoại lệ tài liệu FastAPI hướng dẫn, không phải nới quy tắc.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

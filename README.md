@@ -55,7 +55,17 @@ extra riêng chứ không phải phụ thuộc chính.
 
 ## Dựng một video
 
-Ba lệnh, chi tiết ở [docs/VAN-HANH.md](docs/VAN-HANH.md):
+**Cách dễ nhất** — tạo shortcut Desktop trỏ vào `scripts\aiva-ui.bat`, double-click,
+điền form trên trình duyệt. Chi tiết ở [docs/VAN-HANH.md](docs/VAN-HANH.md).
+
+```powershell
+uv run aiva ui          # mở giao diện local ở http://127.0.0.1:8765/
+```
+
+Giao diện chạy trên chính máy này, chỉ bind `127.0.0.1`, và chỉ là vỏ bọc quanh
+các lệnh CLI dưới đây — mọi hàng rào an toàn vẫn nguyên hiệu lực.
+
+**Bằng dòng lệnh:**
 
 ```powershell
 uv run aiva make --id video-dau-tien --brief "..."          # lập kế hoạch, in việc còn thiếu

@@ -26,6 +26,55 @@ uv run aiva doctor
 
 ---
 
+## Cách dễ nhất: shortcut ngoài Desktop
+
+### Lần đầu — tạo shortcut (làm một lần)
+
+1. Chuột phải ra Desktop → **New** → **Shortcut**.
+2. Dán đúng đường dẫn này vào ô location:
+
+   ```text
+   F:\AI-VIDEO-AGENT\scripts\aiva-ui.bat
+   ```
+
+3. Đặt tên, ví dụ **Dựng video**. Xong.
+
+### Mỗi lần dùng
+
+Double-click shortcut. Nó tự làm ba việc rồi mở trình duyệt:
+
+1. kiểm `uv` có trên PATH;
+2. bật container Duix nếu chưa chạy, chờ tối đa 120 giây;
+3. mở giao diện ở `http://127.0.0.1:8765/`.
+
+**Cửa sổ đen phải mở suốt quá trình dựng** — đóng nó là huỷ. Docker vẫn chạy sau
+khi bạn tắt giao diện; nạp lại model mất ~17 giây nên để đó là cố ý. Muốn tắt hẳn:
+
+```bash
+docker compose -f deploy/duix/docker-compose.yml down
+```
+
+### Luồng dùng trên giao diện
+
+1. **Kiểm tra máy** — bốn đèn `ffprobe · docker · duix · vram`. Đỏ thì xử theo
+   hướng dẫn ngay dòng đó rồi bấm lại.
+2. Điền **Project ID** và **nội dung**, bấm **Xem kịch bản** để duyệt cách chia cảnh.
+3. Điền tên chủ sở hữu, chọn **video người đại diện** và **mẫu giọng**, bấm thêm từng cái.
+4. Điền **tên người duyệt**, bấm **Chạy thử (mock)** để xem nhanh, rồi **Dựng video thật**.
+5. Xong thì bấm **Mở thư mục kết quả**.
+
+Giao diện chạy trên **chính máy này**, không gửi gì ra ngoài và không mở ra mạng
+LAN. Nó chỉ là vỏ: mọi việc thật đều gọi lại đúng các lệnh CLI bên dưới, nên mọi
+hàng rào (consent, duyệt kịch bản, chặn chi phí, kiểm tài nguyên) vẫn nguyên hiệu lực.
+
+Không có shortcut cũng mở được:
+
+```bash
+uv run aiva ui
+```
+
+---
+
 ## Ba lệnh
 
 ### 1. Tạo project và xem còn thiếu gì
@@ -107,6 +156,7 @@ trong repo Git.
 | Thứ | Đường dẫn |
 |---|---|
 | **Video hoàn chỉnh** | `outputs\<id>-<run>.mp4` |
+| **Báo cáo nghiệm thu** | `renders\<run>\report.html` — double-click là mở |
 | Nhật ký kiểm chứng | `renders\<run>\render-manifest.json` |
 | Phụ đề | `renders\<run>\subtitles.srt` |
 | Video avatar thô | `artifacts\<shot>\<hash>\avatar.mp4` |
@@ -126,6 +176,13 @@ container nên chỉ đo được tới đó. `null` nghĩa là *chưa đo đư�
 > `peak_vram_mib` gồm cả nền desktop và mọi ứng dụng khác đang dùng GPU, còn
 > `est_vram_mib` (8500) là phần *riêng Duix* cộng biên an toàn. Thấy 11958 > 8500
 > **không** có nghĩa là vượt ngưỡng.
+
+`report.html` sinh tự động sau mỗi lần render thành công, nằm cạnh manifest. Mở
+bằng double-click, không cần server. Nó hiện video, thời lượng, từng cảnh, phụ
+đề, model/phiên bản, VRAM đỉnh, cảnh báo khẩu hình và hash truy vết — tất cả đọc
+từ manifest, không tự tính lại gì. **MP4 mới là sản phẩm; HTML chỉ là báo cáo.**
+Trang này cố ý *không* nhúng lệnh FFmpeg đầy đủ vì nó mang theo đường dẫn của
+máy bạn; cần chẩn đoán thì đọc `render-manifest.json`.
 
 Xem lại các lần chạy:
 
@@ -152,6 +209,10 @@ uv run aiva status
 | `MuseTalk là research candidate` | Project chốt `avatar: musetalk` | Sửa `providers.avatar` về `"duix"` trong `project.json` |
 | `Phê duyệt đã hết hiệu lực` | Sửa kịch bản sau khi duyệt | Duyệt lại — phê duyệt neo vào hash storyboard |
 | Chữ tiếng Việt lỗi trong `--help` | Codepage console | Đặt `PYTHONIOENCODING=utf-8` |
+| `Giao diện web cần fastapi…` | Chưa cài extra | `uv sync --extra tts` |
+| `Đang có job 'render' chạy dở` | Bấm dựng hai lần | Đợi lượt đang chạy xong — Duix chỉ chạy một job |
+| Shortcut mở rồi tắt ngay | `uv` chưa có trên PATH | Cài `uv`, **mở lại** cửa sổ, thử lại |
+| `Container đã bật nhưng … không trả lời` | Duix lên chậm hoặc lỗi | `docker logs --tail 50 duix-avatar-gen-video` |
 
 ---
 

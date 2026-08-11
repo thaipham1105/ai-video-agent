@@ -24,6 +24,7 @@ from ai_video_agent.composer.runner import FfmpegComposer, MockComposer
 from ai_video_agent.config import Config
 from ai_video_agent.domain.enums import AspectRatio, AssetKind, ProjectState, ProviderMode
 from ai_video_agent.domain.project import Approval, BudgetPolicy, Project, ProviderSelection
+from ai_video_agent.domain.render import RenderManifest
 from ai_video_agent.errors import AivaError, ProjectNotFoundError
 from ai_video_agent.jsonschemas import SchemaName, iter_errors
 from ai_video_agent.orchestrator.estimator import Estimate
@@ -37,6 +38,9 @@ from ai_video_agent.orchestrator.repository import ProjectRepository
 from ai_video_agent.orchestrator.textutil import slugify
 from ai_video_agent.providers.base import TtsRequest
 from ai_video_agent.providers.registry import build_provider_set
+from ai_video_agent.webui import DEFAULT_PORT, HOST
+from ai_video_agent.webui.launcher import ensure_duix_ready
+from ai_video_agent.webui.report import write_report
 
 app = typer.Typer(
     name="aiva",
@@ -434,7 +438,29 @@ def render(
         console.print(
             "[yellow]![/yellow] Output là file GIẢ do mock sinh ra, không phải video thật."
         )
+    bao_cao = _viet_bao_cao(repo, manifest)
+    if bao_cao is not None:
+        console.print(f"Báo cáo: {bao_cao}")
     _print_warnings(manifest.warnings)
+
+
+def _viet_bao_cao(repo: ProjectRepository, manifest: RenderManifest) -> Path | None:
+    """Sinh ``report.html`` cạnh manifest sau khi render xong.
+
+    Đặt ở tầng CLI chứ không trong ``pipeline``: pipeline đã nghiệm thu và báo
+    cáo không phải việc của nó. Ở đây thì cả ``aiva render``, ``aiva make`` lẫn
+    giao diện web đều có báo cáo mà không ai phải nhớ gọi thêm lệnh.
+
+    Không bao giờ làm hỏng một lượt render đã thành công: viết báo cáo lỗi thì
+    nói ra rồi thôi.
+    """
+    if manifest.status != "succeeded":
+        return None
+    try:
+        return write_report(repo.paths(manifest.project_id).run_dir(manifest.run_id), manifest)
+    except OSError as exc:
+        console.print(f"[yellow]![/yellow] Không viết được report.html: {exc}")
+        return None
 
 
 # --------------------------------------------------------- render-resume -----
@@ -1079,6 +1105,49 @@ def validate(
 
     if failures:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def ui(
+    port: Annotated[int, typer.Option("--port", help="Cổng local.")] = DEFAULT_PORT,
+    open_browser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Tự mở trình duyệt.")
+    ] = True,
+    start_duix: Annotated[
+        bool,
+        typer.Option("--start-duix/--no-start-duix", help="Bật container Duix nếu chưa chạy."),
+    ] = False,
+) -> None:
+    """Mở giao diện web **chạy trên chính máy này** để dựng video.
+
+    Không có tuỳ chọn ``--host``: server luôn bind ``127.0.0.1``. Máy này dựng
+    video từ hình và giọng thật của người dùng, mở ra LAN là biến nó thành một
+    dịch vụ không xác thực cho cả mạng.
+
+    Giao diện chỉ là vỏ — mọi việc thật đều gọi lại đúng lệnh CLI, nên mọi hàng
+    rào (gate, consent, cost guard, preflight tài nguyên) vẫn nguyên hiệu lực.
+    """
+    #: Import **trong hàm**: ``webui.app`` kéo theo ``webui.service``, mà module
+    #: đó lại import ngược ``cli.main`` (đó chính là seam "UI gọi lại CLI").
+    #: Import ở cấp module sẽ thành vòng. Đồng thời giữ đúng AGENTS.md: fastapi
+    #: chỉ nạp khi thật sự chạy UI.
+    from ai_video_agent.webui.app import serve
+
+    config = Config.from_env()
+    if start_duix:
+        console.print("[bold]•[/bold] Kiểm tra Duix…")
+        ket_qua = ensure_duix_ready(config.duix_base_url)
+        mau = "green" if ket_qua.ready else "red"
+        console.print(f"  [{mau}]{ket_qua.reason}[/] {ket_qua.detail}")
+        if not ket_qua.ready:
+            _fail("Chưa bật được Duix. UI vẫn mở được, nhưng render thật sẽ hỏng.")
+            return
+
+    console.print(f"Giao diện: [bold]http://{HOST}:{port}/[/bold]  (Ctrl+C để dừng)")
+    try:
+        serve(config, port=port, open_browser=open_browser)
+    except AivaError as exc:
+        _fail(str(exc))
 
 
 if __name__ == "__main__":  # pragma: no cover
