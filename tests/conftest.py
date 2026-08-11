@@ -60,6 +60,9 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # được", đúng trạng thái của một máy không có GPU. Test nào cần dò thật thì
     # tự tiêm probe của mình.
     monkeypatch.setattr(resource_budget, "probe_free_vram_mib", lambda: None)
+    # Từ D05-C, sampler lúc render cũng hỏi tổng VRAM. Chặn nốt đường đó, nếu
+    # không thì `peak_vram_mib` trong test sẽ phụ thuộc vào card đang cắm.
+    monkeypatch.setattr(resource_budget, "probe_total_vram_mib", lambda: None)
 
 
 @pytest.fixture

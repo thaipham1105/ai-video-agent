@@ -69,6 +69,36 @@ kế hoạch — **duyệt kịch bản là việc của người**, không ph�
 
 ---
 
+## Lệnh tự kiểm máy trước khi dựng
+
+Ở lần dựng thật (không `--mock`), `make` hỏi bốn câu **trước khi** duyệt kịch bản:
+
+```text
+• Kiểm tra máy trước khi dựng…
+  PASS ffprobe   ffprobe có trên PATH
+  PASS docker    daemon 29.6.1
+  PASS duix      http://127.0.0.1:8383/ trả HTTP 404 — server đang nghe
+  WARN vram      card 12282 MiB (đủ), nhưng chỉ còn trống 7651 MiB / đỉnh đã đo 8500 MiB
+```
+
+Có `FAIL` thì lệnh dừng ngay, chưa đụng gì tới project — xử xong chạy lại đúng
+lệnh cũ là đi tiếp. Vài điều dễ hiểu nhầm:
+
+- **`duix` trả HTTP 404 là ĐÚNG.** `/` không phải route của Duix; 404 nghĩa là
+  server đã lên và đang nghe.
+- **`vram` so với *sức chứa của card*, không phải phần đang trống.** Con số Duix
+  cần (8500 MiB) là đỉnh của **cả card** đo lúc render — đã gồm nền desktop và
+  phần container giữ sẵn. Đem nó so với phần trống là trừ hai lần cùng một chỗ.
+  Nên: card nhỏ hơn 8500 mới là `FAIL`; card đủ chỗ mà đang bị chiếm chỉ là
+  `WARN` — đóng bớt app hoặc `restart` container là xong.
+- **`vram` báo `INFO` không phải lỗi.** Máy không hỏi được `nvidia-smi` thì đó là
+  *chưa xác minh được*, và lệnh vẫn chạy tiếp. Muốn chặn theo ngưỡng thì khai
+  `AIVA_VRAM_BUDGET_MIB` — khai rồi thì con số đó thắng máy dò.
+- **Lệnh này chỉ hỏi, không sửa.** Nó không tự bật container, không tự đóng ứng
+  dụng đang chiếm GPU.
+
+---
+
 ## Output nằm ở đâu
 
 Mọi thứ nằm dưới `F:\AI-VIDEO-AGENT-RUNTIME\projects\<id>\` — **không bao giờ**
@@ -83,8 +113,19 @@ trong repo Git.
 | Giọng đã sinh | `artifacts\<shot>\<hash>\audio.wav` |
 | Tài sản đã đăng ký | `assets\avatar\`, `assets\voice\` |
 
-`render-manifest.json` ghi model nào, phiên bản nào, băm của từng file vào/ra, và
-chi phí. Đây là thứ để sau này nhìn một video bất kỳ và biết nó từ đâu ra.
+`render-manifest.json` ghi model nào, phiên bản nào, băm của từng file vào/ra,
+chi phí, **và VRAM đỉnh đo được trong lúc chạy** (`records[].avatar_provenance
+.resources.peak_vram_mib`). Đây là thứ để sau này nhìn một video bất kỳ và biết
+nó từ đâu ra — và để biết ước lượng VRAM đang sát hay lệch thực tế.
+
+`peak_vram_mib` là đỉnh của **cả card**, không riêng Duix: adapter đứng ngoài
+container nên chỉ đo được tới đó. `null` nghĩa là *chưa đo được* (máy không có
+`nvidia-smi`), khác hẳn 0.
+
+> **Đừng so thẳng `peak_vram_mib` với `est_vram_mib` cạnh nó.** Hai số khác gốc:
+> `peak_vram_mib` gồm cả nền desktop và mọi ứng dụng khác đang dùng GPU, còn
+> `est_vram_mib` (8500) là phần *riêng Duix* cộng biên an toàn. Thấy 11958 > 8500
+> **không** có nghĩa là vượt ngưỡng.
 
 Xem lại các lần chạy:
 
@@ -104,6 +145,10 @@ uv run aiva status
 | `Thiếu tài sản avatar hợp lệ` | Chưa có `consent = granted` | Đăng ký lại bằng `avatar-add` với `--owner` |
 | `Project đang ở trạng thái PLANNED` | Chưa duyệt kịch bản | Thêm `--by "Tên bạn"` |
 | `duix không đủ tài nguyên` | VRAM đang bị chiếm | Đóng bớt trình duyệt/ứng dụng đồ hoạ rồi chạy lại |
+| `WARN vram — chỉ còn trống N MiB` | Container Duix còn giữ model của lượt trước | Chạy tiếp được; gặp OOM thì `docker compose -f deploy/duix/docker-compose.yml restart` |
+| `FAIL vram — không đủ chỗ` | Card nhỏ hơn đỉnh Duix cần | Đóng app không cứu được — cần card lớn hơn hoặc giảm độ phân giải |
+| `FAIL docker — Docker daemon chưa chạy` | Chưa mở Docker Desktop | Mở Docker Desktop, đợi nó xanh rồi chạy lại |
+| `FAIL ffprobe` | FFmpeg chưa cài, hoặc terminal mở trước khi cài | Mở lại terminal; còn thiếu thì cài FFmpeg |
 | `MuseTalk là research candidate` | Project chốt `avatar: musetalk` | Sửa `providers.avatar` về `"duix"` trong `project.json` |
 | `Phê duyệt đã hết hiệu lực` | Sửa kịch bản sau khi duyệt | Duyệt lại — phê duyệt neo vào hash storyboard |
 | Chữ tiếng Việt lỗi trong `--help` | Codepage console | Đặt `PYTHONIOENCODING=utf-8` |

@@ -34,7 +34,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -63,7 +62,8 @@ from ai_video_agent.providers.base import (
 )
 
 #: Đo fps/thời lượng bằng bản dùng chung: Duix mắc đúng cái bẫy fps mà lượt
-#: ``f16bd2a245d4`` đã lộ ra ở đây, nên một bản cho cả hai adapter.
+#: ``f16bd2a245d4`` đã lộ ra ở đây, nên một bản cho cả hai adapter. Cùng lý do
+#: với ``vram_sampler`` — D05-C gộp bản sao ở đây về một chỗ.
 from ai_video_agent.providers.media_probe import probe_entries, probe_video_fps
 from ai_video_agent.providers.musetalk.capability import (
     GATE,
@@ -74,6 +74,7 @@ from ai_video_agent.providers.musetalk.capability import (
     REQUIRED_WEIGHTS,
     UNET_SHA256,
 )
+from ai_video_agent.providers.vram_sampler import VRAM_SAMPLE_INTERVAL_SEC, VramSampler
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -95,41 +96,6 @@ DEFAULT_TIMEOUT_SEC = 1_800
 #: cũng dựng được, và adapter không được phụ thuộc vào việc tầng trên đã lọc.
 #: Duix không có phơi nhiễm này vì shot_id của nó chỉ vào payload HTTP.
 SHOT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
-
-#: Khoảng lấy mẫu VRAM trong lúc render. 1 s là nhịp mà bake-off đã dùng —
-#: đủ dày để bắt đỉnh của một lượt ~4 phút, đủ thưa để không quấy máy.
-VRAM_SAMPLE_INTERVAL_SEC = 1.0
-
-#: Truy vấn tổng VRAM của card. Cố ý tách khỏi ``resource_budget`` (chỉ hỏi phần
-#: **trống**) và cố ý **không** sửa file đó — nó nằm ngoài allowlist của D04-G.
-#: Đây là một trùng lặp nhỏ có ý thức; gộp chung với LOW-3 khi nâng cả hai probe
-#: thành API công khai.
-_NVIDIA_SMI_TOTAL_ARGS = ("--query-gpu=memory.total", "--format=csv,noheader,nounits")
-
-
-def _probe_total_vram_mib() -> int | None:
-    """Tổng VRAM của card rảnh nhất, hoặc ``None`` nếu không hỏi được.
-
-    Chỉ đọc, không nạp gì — cùng kỹ thuật ``cli/doctor.py`` và
-    ``resource_budget.probe_free_vram_mib`` đang dùng.
-    """
-    binary = shutil.which("nvidia-smi")
-    if binary is None:
-        return None
-    try:
-        completed = subprocess.run(  # noqa: S603 - đường dẫn do shutil.which giải, tham số cố định
-            [binary, *_NVIDIA_SMI_TOTAL_ARGS],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    values = [int(line.strip()) for line in completed.stdout.splitlines() if line.strip().isdigit()]
-    return max(values) if values else None
 
 
 def _wsl_file_is_executable(wsl_bin: str, distro: str, posix_path: str) -> bool:
@@ -153,66 +119,6 @@ def _wsl_file_is_executable(wsl_bin: str, distro: str, posix_path: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return completed.returncode == 0
-
-
-class _VramSampler:
-    """Lấy mẫu VRAM trống ở luồng nền trong lúc subprocess render chạy.
-
-    Cổng G3 của D04-G §4.1 nói rõ: giai đoạn này **ghi nhận, không chặn**. Nên
-    mọi lỗi lấy mẫu đều bị nuốt — một lượt render 4 phút không được hỏng chỉ vì
-    ``nvidia-smi`` bận. Không đo được thì ``peak()`` trả ``None``, giữ đúng nghĩa
-    "chưa đo" mà ``AvatarProvenance`` đã định.
-    """
-
-    def __init__(
-        self,
-        sampler: Callable[[], int | None],
-        total_probe: Callable[[], int | None],
-        interval_sec: float,
-    ) -> None:
-        self._sampler = sampler
-        self._total_probe = total_probe
-        self._interval_sec = interval_sec
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._min_free_mib: int | None = None
-
-    def __enter__(self) -> _VramSampler:
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="musetalk-vram")
-        self._thread.start()
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=self._interval_sec * 3)
-
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                free = self._sampler()
-            except Exception:  # noqa: BLE001 - G3 ghi nhận, không được làm hỏng lượt render
-                free = None
-            if free is not None and (self._min_free_mib is None or free < self._min_free_mib):
-                self._min_free_mib = free
-            self._stop.wait(self._interval_sec)
-
-    def peak_used_mib(self) -> int | None:
-        """Đỉnh VRAM **đã dùng** = tổng trừ đi lượng trống thấp nhất quan sát được.
-
-        Trả về lượng dùng của **cả card**, không riêng MuseTalk — đúng như cách
-        bake-off đã đo (``nvidia-smi --query-gpu=memory.used``), nên con số này so
-        được trực tiếp với 9.798 MiB trong ``MUSETALK_RESOURCES``.
-        """
-        if self._min_free_mib is None:
-            return None
-        try:
-            total = self._total_probe()
-        except Exception:  # noqa: BLE001 - cùng lý do với vòng lấy mẫu
-            total = None
-        if total is None or total <= self._min_free_mib:
-            return None
-        return total - self._min_free_mib
 
 
 #: Dung sai khi so mtime của output với mốc bắt đầu job.
@@ -312,7 +218,7 @@ class MuseTalkAvatarProvider:
         self._hf_home = hf_home
         self._timeout_sec = timeout_sec
         self._vram_sampler = vram_sampler
-        self._vram_total_probe = vram_total_probe or _probe_total_vram_mib
+        self._vram_total_probe = vram_total_probe
         self._vram_sample_interval_sec = vram_sample_interval_sec
         self.last_job: MuseTalkJob | None = None
 
@@ -321,6 +227,16 @@ class MuseTalkAvatarProvider:
         if self._vram_sampler is not None:
             return self._vram_sampler()
         return resource_budget.probe_free_vram_mib()
+
+    def _probe_total_vram_mib(self) -> int | None:
+        """Tổng VRAM, qua probe đã tiêm hoặc probe chung.
+
+        Gọi qua **module attribute** chứ không bind sẵn ở ``__init__``: đó là
+        seam mà ``tests/conftest.py`` thay để không test nào chạm ``nvidia-smi``.
+        """
+        if self._vram_total_probe is not None:
+            return self._vram_total_probe()
+        return resource_budget.probe_total_vram_mib()
 
     # ----- danh tính, năng lực, báo giá ---------------------------------------
 
@@ -702,10 +618,11 @@ class MuseTalkAvatarProvider:
         Lấy mẫu VRAM chạy song song trong ``finally`` để đỉnh được ghi **kể cả khi
         job hỏng** — với một lỗi OOM thì con số đó chính là bằng chứng cần nhất.
         """
-        sampler = _VramSampler(
+        sampler = VramSampler(
             self._sample_free_vram_mib,
-            self._vram_total_probe,
+            self._probe_total_vram_mib,
             self._vram_sample_interval_sec,
+            thread_name="musetalk-vram",
         )
         try:
             with sampler:

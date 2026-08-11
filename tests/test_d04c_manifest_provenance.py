@@ -427,14 +427,23 @@ def test_config_thang_may_do(tmp_path: Path) -> None:
 
 
 def test_khong_khai_thi_dung_may_do(tmp_path: Path) -> None:
+    """Không khai thì dò máy — và ``vram_mib`` là **tổng của card**, không phải trống.
+
+    Nguồn ghi rõ ``(total)`` để sau này đọc manifest còn biết con số ấy là sức
+    chứa hay phần rảnh; nhầm hai thứ đó chính là lỗi D05-C đã bắt.
+    """
     config = Config(runtime_dir=tmp_path)
     budget = ResourceBudget.detect(
-        config, vram_probe=lambda: 9_000, storage_probe=lambda _p: 123_456
+        config,
+        vram_probe=lambda: 9_000,
+        vram_free_probe=lambda: 3_000,
+        storage_probe=lambda _p: 123_456,
     )
 
     assert budget.vram_mib == 9_000
+    assert budget.vram_free_mib == 3_000
     assert budget.storage_mib == 123_456
-    assert "vram=nvidia-smi" in budget.sources
+    assert "vram=nvidia-smi(total)" in budget.sources
 
 
 def test_may_do_that_bai_thi_de_none_chu_khong_de_0(tmp_path: Path) -> None:

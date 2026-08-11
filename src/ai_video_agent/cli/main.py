@@ -13,10 +13,12 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from ai_video_agent import CURRENT_GATE, __version__
 from ai_video_agent.cli.doctor import Status, run_checks, worst_status
+from ai_video_agent.cli.preflight import blocking, check_duix_ready
 from ai_video_agent.clock import now_utc
 from ai_video_agent.composer.runner import FfmpegComposer, MockComposer
 from ai_video_agent.config import Config
@@ -60,6 +62,48 @@ def _repo(config: Config | None = None) -> ProjectRepository:
 def _fail(message: str) -> None:
     console.print(f"[red]Lỗi:[/red] {message}")
     raise typer.Exit(code=1)
+
+
+def _kiem_tra_van_hanh() -> bool:
+    """In kết quả kiểm tra vận hành; trả ``False`` nếu có thứ chặn.
+
+    Chạy **trước** bước duyệt: hỏng ở đây thì chưa có gì bị đổi trạng thái, chạy
+    lại đúng lệnh cũ là đi tiếp. Duyệt xong mới phát hiện thiếu Docker thì project
+    đã ở APPROVED trong khi chưa dựng được gì.
+    """
+    console.print("[bold]•[/bold] Kiểm tra máy trước khi dựng…")
+    ket_qua = check_duix_ready(Config.from_env())
+    for r in ket_qua:
+        mau = _STATUS_STYLE[r.status]
+        console.print(f"  [{mau}]{r.status.value:4}[/] {r.name:9} {escape(r.detail)}")
+    chan = blocking(ket_qua)
+    if chan:
+        console.print(
+            f"\n[red]Dừng lại:[/red] còn {len(chan)} thứ chưa sẵn sàng. "
+            "Xử xong rồi chạy lại đúng lệnh này."
+        )
+        return False
+    return True
+
+
+def _print_warnings(warnings: list[str]) -> None:
+    """In cảnh báo của manifest, **giữ nguyên từng ký tự** của nội dung.
+
+    Phải ``escape``: Rich đọc ``[...]`` trong chuỗi là thẻ định dạng. Cảnh báo
+    "Lệnh FFmpeg: …" chứa ``-map [vout]``, và Rich nuốt mất ``[vout]`` — người
+    dùng chép lệnh in ra sẽ được một lệnh hỏng. Lệnh thật trong manifest vẫn
+    luôn đúng; hỏng chỉ ở khâu hiển thị.
+
+    Markup bao ngoài (``[dim]``, ``[yellow]``) là của ta nên vẫn sống.
+    """
+    for warning in warnings:
+        # Cảnh báo ngôn ngữ nói về trần chất lượng khẩu hình — in [dim] cùng các
+        # ghi chú thường lệ thì đúng là có hiện, nhưng không ai đọc.
+        noi_dung = escape(warning)
+        if warning.startswith(LANGUAGE_WARNING_PREFIX):
+            console.print(f"[yellow]![/yellow] {noi_dung}")
+        else:
+            console.print(f"[dim]• {noi_dung}[/dim]")
 
 
 @app.callback(invoke_without_command=True)
@@ -296,9 +340,9 @@ def estimate(
         f"trần còn lại: {project.budget.remaining_usd:.4f} USD)"
     )
     for line in {line.assumption for line in result.lines if line.assumption}:
-        console.print(f"[dim]• {line}[/dim]")
+        console.print(f"[dim]• {escape(line)}[/dim]")
     for warning in result.warnings:
-        console.print(f"[yellow]![/yellow] {warning}")
+        console.print(f"[yellow]![/yellow] {escape(warning)}")
 
 
 # ---------------------------------------------------------------- render -----
@@ -390,13 +434,7 @@ def render(
         console.print(
             "[yellow]![/yellow] Output là file GIẢ do mock sinh ra, không phải video thật."
         )
-    for warning in manifest.warnings:
-        # Cảnh báo ngôn ngữ nói về trần chất lượng khẩu hình — in [dim] cùng các
-        # ghi chú thường lệ thì đúng là có hiện, nhưng không ai đọc.
-        if warning.startswith(LANGUAGE_WARNING_PREFIX):
-            console.print(f"[yellow]![/yellow] {warning}")
-        else:
-            console.print(f"[dim]• {warning}[/dim]")
+    _print_warnings(manifest.warnings)
 
 
 # --------------------------------------------------------- render-resume -----
@@ -456,13 +494,7 @@ def render_resume(
     )
     if manifest.outputs:
         console.print(f"Output: {manifest.outputs[0]}")
-    for warning in manifest.warnings:
-        # Cảnh báo ngôn ngữ nói về trần chất lượng khẩu hình — in [dim] cùng các
-        # ghi chú thường lệ thì đúng là có hiện, nhưng không ai đọc.
-        if warning.startswith(LANGUAGE_WARNING_PREFIX):
-            console.print(f"[yellow]![/yellow] {warning}")
-        else:
-            console.print(f"[dim]• {warning}[/dim]")
+    _print_warnings(manifest.warnings)
 
 
 # ---------------------------------------------------------------- status -----
@@ -749,6 +781,9 @@ def make(
         console.print(
             f'[bold]  aiva make --id {project_id} --brief "{brief[:40]}…" --by "<Tên bạn>"[/bold]'
         )
+        return
+
+    if not mock and not _kiem_tra_van_hanh():
         return
 
     console.print(f"[bold]3/4[/bold] Duyệt kịch bản (bởi {by})…")

@@ -41,11 +41,16 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_video_agent import gate_is_open
 from ai_video_agent.domain.enums import ProviderKind, ProviderMode, RenderStage
 from ai_video_agent.errors import ConsentMissingError, GateNotReachedError, ProviderError
+
+#: Import **module** chứ không phải hàm: ``tests/conftest.py`` thay probe ở cấp
+#: module để không test nào chạm ``nvidia-smi`` thật. Bind thẳng vào tên hàm sẽ
+#: vô hiệu hoá lớp chặn đó.
+from ai_video_agent.providers import resource_budget
 from ai_video_agent.providers._placeholder import read_wav_duration
 from ai_video_agent.providers.avatar_capability import check_avatar_request
 from ai_video_agent.providers.base import (
@@ -61,6 +66,10 @@ from ai_video_agent.providers.base import (
 from ai_video_agent.providers.duix.capability import DUIX_CAPABILITY, DUIX_RESOURCES
 from ai_video_agent.providers.media_probe import probe_video_fps
 from ai_video_agent.providers.pricing import DUIX_LOCAL
+from ai_video_agent.providers.vram_sampler import VRAM_SAMPLE_INTERVAL_SEC, VramSampler
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 GATE = "D03"
 
@@ -129,6 +138,12 @@ class DuixAvatarProvider:
         result_dir_host: Path | None = None,
         poll_interval_sec: float = POLL_INTERVAL_SEC,
         ffprobe_bin: str = "ffprobe",
+        #: Tiêm được để test không chạm ``nvidia-smi`` thật. ``None`` nghĩa là
+        #: dùng probe chung của dự án, gọi qua **module attribute** nên lớp chặn
+        #: trong ``tests/conftest.py`` vẫn có hiệu lực.
+        vram_sampler: Callable[[], int | None] | None = None,
+        vram_total_probe: Callable[[], int | None] | None = None,
+        vram_sample_interval_sec: float = VRAM_SAMPLE_INTERVAL_SEC,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout_sec = timeout_sec
@@ -138,8 +153,25 @@ class DuixAvatarProvider:
         self._result_dir_host = result_dir_host
         self._poll_interval_sec = poll_interval_sec
         self._ffprobe_bin = ffprobe_bin
+        self._vram_sampler = vram_sampler
+        self._vram_total_probe = vram_total_probe
+        self._vram_sample_interval_sec = vram_sample_interval_sec
+        #: Đỉnh của lượt ``generate`` gần nhất. ``None`` tới khi đo được lần đầu.
+        self._peak_vram_mib: int | None = None
         #: Nhật ký lần chạy gần nhất, để pipeline/báo cáo đọc lại.
         self.last_job: DuixJob | None = None
+
+    def _sample_free_vram_mib(self) -> int | None:
+        """Một lần lấy mẫu VRAM trống, qua probe đã tiêm hoặc probe chung."""
+        if self._vram_sampler is not None:
+            return self._vram_sampler()
+        return resource_budget.probe_free_vram_mib()
+
+    def _probe_total_vram_mib(self) -> int | None:
+        """Tổng VRAM, qua probe đã tiêm hoặc probe chung."""
+        if self._vram_total_probe is not None:
+            return self._vram_total_probe()
+        return resource_budget.probe_total_vram_mib()
 
     def to_container_path(self, host_path: Path) -> str:
         """Đổi đường dẫn host sang đường dẫn container theo volume đã mount."""
@@ -316,12 +348,26 @@ class DuixAvatarProvider:
         source_fps, _ = probe_video_fps(self._ffprobe_bin, request.avatar_source)
 
         started = time.monotonic()
-        job = self.submit(
-            job_code=f"aiva-{request.shot_id}-{int(time.time())}",
-            video_url=self.to_container_path(request.avatar_source),
-            audio_url=self.to_container_path(request.audio_path),
+        #: Lấy mẫu VRAM bao trọn cả ``submit`` lẫn ``wait``: Duix nạp model rồi
+        #: sinh khung trong container, đỉnh rơi vào giữa quãng chờ đó. Đặt trong
+        #: ``try/finally`` để đỉnh được ghi **kể cả khi job hỏng** — với một lỗi
+        #: OOM thì con số đó chính là bằng chứng cần nhất.
+        sampler = VramSampler(
+            self._sample_free_vram_mib,
+            self._probe_total_vram_mib,
+            self._vram_sample_interval_sec,
+            thread_name="duix-vram",
         )
-        self.wait(job)
+        try:
+            with sampler:
+                job = self.submit(
+                    job_code=f"aiva-{request.shot_id}-{int(time.time())}",
+                    video_url=self.to_container_path(request.avatar_source),
+                    audio_url=self.to_container_path(request.audio_path),
+                )
+                self.wait(job)
+        finally:
+            self._peak_vram_mib = sampler.peak_used_mib()
         elapsed = time.monotonic() - started
 
         produced = self._resolve_result(job)
@@ -364,8 +410,10 @@ class DuixAvatarProvider:
             image_digest=self._image_digest or "",
             params={str(k): str(v) for k, v in job.payload.items() if k != "code"},
             render_seconds=round(render_seconds, 3),
-            #: Duix chạy trong container; adapter không quan sát được VRAM đỉnh.
-            peak_vram_mib=None,
+            #: Đỉnh của **cả card**, không riêng container Duix — adapter đứng
+            #: ngoài container nên chỉ đo được tới đó. ``None`` = chưa đo được
+            #: (không có ``nvidia-smi``), khác hẳn 0.
+            peak_vram_mib=self._peak_vram_mib,
         )
 
     @staticmethod
